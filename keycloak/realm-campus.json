@@ -1,0 +1,52 @@
+{
+  "realm": "campus",
+  "enabled": true,
+  "roles": {
+    "realm": [
+      { "name": "USUARIO" },
+      { "name": "ADMIN" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "campus-api",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "redirectUris": ["https://oauth.pstmn.io/v1/callback"]
+    }
+  ],
+  "users": [
+    {
+      "username": "usuario1",
+      "enabled": true,
+      "email": "usuario1@campus.test",
+      "emailVerified": true,
+      "firstName": "Ana",
+      "lastName": "Pérez",
+      "credentials": [ { "type": "password", "value": "usuario1", "temporary": false } ],
+      "realmRoles": ["USUARIO"]
+    },
+    {
+      "username": "usuario2",
+      "enabled": true,
+      "email": "usuario2@campus.test",
+      "emailVerified": true,
+      "firstName": "Juan",
+      "lastName": "Gómez",
+      "credentials": [ { "type": "password", "value": "usuario2", "temporary": false } ],
+      "realmRoles": ["USUARIO"]
+    },
+    {
+      "username": "admin1",
+      "enabled": true,
+      "email": "admin1@campus.test",
+      "emailVerified": true,
+      "firstName": "Laura",
+      "lastName": "Díaz",
+      "credentials": [ { "type": "password", "value": "admin1", "temporary": false } ],
+      "realmRoles": ["ADMIN"]
+    }
+  ]
+}

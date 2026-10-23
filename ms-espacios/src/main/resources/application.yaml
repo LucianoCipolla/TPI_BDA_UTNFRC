@@ -1,0 +1,23 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: ms-espacios
+  datasource:
+    url: jdbc:h2:file:./data/espacios     # H2 embebida en archivo, como el ejemplo de la cátedra
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+campus:
+  clima:
+    url: ${OPEN_METEO_URL:https://api.open-meteo.com}
+    umbral-lluvia: ${CLIMA_UMBRAL:60}     # %

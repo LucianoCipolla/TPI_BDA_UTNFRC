@@ -1,0 +1,19 @@
+# ===== Maven =====
+# Carpeta donde Maven deja lo compilado (.class) y el .jar empaquetado.
+target/
+
+# ===== IDEs =====
+.idea/
+*.iml
+.vscode/
+
+# ===== Bases H2 embebidas =====
+# Cada microservicio crea su base en ./data al arrancar (jdbc:h2:file:./data/...).
+data/
+*.mv.db
+*.trace.db
+
+# ===== Logs y sistema operativo =====
+*.log
+Thumbs.db
+.DS_Store
