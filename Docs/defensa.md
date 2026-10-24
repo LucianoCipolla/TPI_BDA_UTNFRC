@@ -104,7 +104,7 @@ Ideas clave por si repreguntan:
 - **Por qué los métodos reciben `RuntimeException` y no la excepción concreta:** solo usan `getMessage()`, que tienen todas. El tipo concreto lo decide la anotación `@ExceptionHandler(...)`.
 - **El método privado `error(...)`:** evita repetir la misma línea en cinco métodos (DRY).
 - **400 de `@Valid`:** recorre los `FieldError` y arma un mensaje del tipo `"capacidad: debe ser mayor que 0; nombre: no debe estar vacío"`.
-- **Los otros tres 400:** parámetro obligatorio que falta, parámetro que no se puede convertir (`actividad=NADAR`) y JSON ilegible o con un enum inválido. Sin estos handlers, Spring responde 400 con su propio formato y sin explicar qué está mal (T37).
+- **Los otros cuatro 400:** parámetro obligatorio que falta, parámetro que no se puede convertir (`actividad=NADAR`), JSON ilegible o con un enum inválido, y header obligatorio que falta (`X-Usuario`). Sin estos handlers, Spring responde 400 con su propio formato y sin explicar qué está mal (T37 y T57).
 - **`UNPROCESSABLE_CONTENT` y no `UNPROCESSABLE_ENTITY`:** es el mismo 422. Spring 7 renombró la constante siguiendo la especificación HTTP actual (RFC 9110) y marcó la vieja como *deprecated*. El plan usa el nombre viejo.
 - **Por qué el `pom.xml` también tiene `spring-context`:** `MethodArgumentNotValidException` está en `spring-web`, pero hereda de `BindException` y devuelve un `BindingResult`, que están en `spring-context` (paquete `org.springframework.validation`). `spring-web` no trae `spring-context`, así que sin esa dependencia no compila ("cannot access org.springframework.validation.BindException"). Va `provided` por el mismo motivo que `spring-web`: los microservicios ya lo tienen.
 - **Excepciones no previstas (500):** si salta una que no tiene handler (por ejemplo, un `NullPointerException`), Spring responde 500 con su formato por defecto. No la atrapamos a propósito: un 500 indica un bug que hay que corregir, no un error de negocio.
@@ -318,6 +318,201 @@ Ideas clave por si repreguntan:
 - **Todos en la misma ubicación:** la latitud y longitud de la UTN FRC. Solo importa para la cancha (Open-Meteo).
 - **Paquete `config`:** la convención de la cátedra para la carga de datos de prueba.
 - **Detalle de arranque:** el runner se ejecuta justo después del log "Started", así que durante un instante, en el primer arranque, la lista puede venir vacía.
+
+**Cómo cambiar la configuración sin tocar código (fuentes de configuración)**
+
+> "La URL de Open-Meteo está en el `application.yaml` como `${OPEN_METEO_URL:https://api.open-meteo.com}`. Si existe la variable de entorno `OPEN_METEO_URL`, Spring usa esa; si no, el valor por defecto. Así el mismo JAR corre en el IDE y en Docker, y para la demo de la falla solo cambiamos la variable, sin tocar el código."
+
+- **Prioridad de las fuentes:** un argumento de línea de comandos (`--campus.clima.url=...`) le gana a una variable de entorno, y una variable de entorno le gana al `application.yaml`.
+- **En PowerShell:** `$env:OPEN_METEO_URL = "http://localhost:9"` vale solo en esa terminal; se borra con `Remove-Item Env:OPEN_METEO_URL`.
+- **En Docker:** se pone en el `docker-compose.yml`, bajo `environment:`.
+- **Por qué no editar el yaml para probar:** hay que acordarse de volver atrás, y si se commitea, los demás quedan con las canchas rotas sin saber por qué.
+- **`CLIMA_UMBRAL=0`:** cualquier pronóstico cuenta como lluvia, así la cancha da 422 (RN4) en la demo, aunque no llueva.
+
+---
+
+## Fase 2: ms-reservas
+
+**Cómo se creó el proyecto**
+
+> "Igual que ms-espacios: con Spring Initializr, Boot 4.1.2, Java 25 y las mismas cinco dependencias (Spring Web, Spring Data JPA, H2, Validation y Lombok), con el paquete `ar.edu.utn.frc.bda.campus.reservas`. A mano sumamos `campus-commons` y springdoc, y en la clase principal `scanBasePackages = "ar.edu.utn.frc.bda.campus"` para que encuentre el `GlobalExceptionHandler` del JAR común. Corre en el puerto 8082, con su propia base H2 (`data/reservas`)."
+
+Ideas clave por si repreguntan:
+
+- **Su propia base:** `reservas.mv.db` es distinta de `espacios.mv.db`. ms-reservas no puede leer las tablas de ms-espacios; si necesita algo de un espacio, se lo pide por HTTP (D9, una base por servicio).
+- **`campus.ms-espacios-url: ${MS_ESPACIOS_URL:http://localhost:8081}`:** desde el IDE, ms-espacios está en `localhost:8081`. En Docker, cada contenedor tiene su propio `localhost`, así que ahí la variable vale `http://ms-espacios:8081`: el nombre del servicio en la red interna de Compose.
+- **Mismas decisiones que ms-espacios:** `open-in-view: false` (T14), H2 en archivo (D10), `ddl-auto: update` y el mismo patrón de propiedades con variable de entorno (T15).
+
+**`EstadoReserva`: la máquina de estados**
+
+> "Una reserva tiene cuatro estados: PENDIENTE, CONFIRMADA, RECHAZADA y CANCELADA. Nace PENDIENTE si es un evento y CONFIRMADA si no (RN13). El enum sabe a qué estados puede pasar cada uno con el método `puedePasarA`: una pendiente puede confirmarse, rechazarse o cancelarse; una confirmada solo cancelarse; rechazada y cancelada son finales. Cualquier otro cambio es un 409 (RN14). Como las reglas están dentro del enum, ningún método del service puede saltearlas. Además, `ACTIVOS` agrupa los estados que ocupan el espacio (PENDIENTE y CONFIRMADA), que es lo que usan la superposición (RN6) y la búsqueda de disponibles."
+
+Ideas clave por si repreguntan:
+
+- **Máquina de estados:** un objeto solo cambia de estado por las transiciones permitidas. Es el diagrama de estados de la Entrega 1 escrito en código.
+- **Por qué en el enum y no en el service:** la regla queda en un solo lugar, junto al dato. Aprobar, rechazar y cancelar preguntan lo mismo (`puedePasarA`) y no pueden contradecirse.
+- **`switch` como expresión (`->`):** cada `case` devuelve un valor. Si se agrega un estado nuevo y no se contempla, **no compila**: el compilador obliga a cubrir todos los casos.
+- **`RECHAZADA, CANCELADA -> false`:** son estados finales; ya no pueden cambiar.
+- **`ACTIVOS = EnumSet.of(PENDIENTE, CONFIRMADA)`:** una constante del enum. `EnumSet` es un `Set` optimizado para enums. Las pendientes cuentan como ocupadas para que el ADMIN no pueda aprobar dos eventos en la misma franja (D19).
+- **Por qué no el patrón State (una clase por estado):** para cuatro estados con reglas de una línea, un `switch` es más claro (D18).
+- **Estados que cambian solos con el tiempo** (FINALIZADA, VENCIDA): no los tenemos, porque necesitarían una tarea programada. Quedan fuera del alcance (D18).
+
+**`TipoActividad` repetido en ms-reservas**
+
+> "Es el mismo enum que en ms-espacios, con los mismos valores, pero declarado otra vez en este servicio. No lo compartimos por el JAR común porque es una clase de dominio, y compartir dominio acoplaría los servicios (D13). Viaja entre ellos como texto en la URL (`actividad=CLASE`), así que alcanza con que los valores coincidan."
+
+**La entidad `Reserva`**
+
+> "Es la reserva guardada en la base de ms-reservas: quién reservó (`usuario`, que viene del header `X-Usuario`), qué espacio, en qué franja, para cuántas personas, qué actividad y en qué estado. Del espacio guarda solo el `espacioId` y una copia del nombre, no una relación JPA, porque el espacio vive en la base de otro servicio. Tiene `@Version` para el bloqueo optimista: si un ADMIN aprueba y el dueño cancela la misma reserva al mismo tiempo, el segundo recibe 409 en vez de pisar el cambio del primero."
+
+Ideas clave por si repreguntan:
+
+- **`espacioId` y no `@ManyToOne Espacio`:** la tabla `espacios` no existe en esta base (D9). Una relación JPA necesita una clave foránea a una tabla de la misma base.
+- **`espacioNombre` (copia):** para listar y cancelar reservas aunque ms-espacios esté caído, y para no hacer una llamada por cada reserva al listar (D11). El costo: si se renombra un espacio, las reservas viejas muestran el nombre anterior.
+- **`usuario` es un `String`:** el `preferred_username` del token (por ejemplo `usuario1`). No hay tabla de usuarios: los usuarios los maneja Keycloak.
+- **`LocalDateTime`:** fecha y hora de inicio y de fin, sin zona horaria, en hora local.
+- **`@Version Long version`:** JPA guarda un número de versión por fila. Al hacer `UPDATE ... WHERE id = ? AND version = ?`, incrementa la versión. Si otro la cambió antes, el `WHERE` no encuentra la fila, y JPA lanza `OptimisticLockException` → 409.
+- **Enums como `VARCHAR`:** mismo motivo que T18. Si se agrega un estado, la base lo acepta sin migrar la columna.
+
+**La entidad `AgendaEspacio`**
+
+> "Es una tabla con una fila por espacio y un campo `@Version`, que existe solo para la concurrencia (RN15). Dos pedidos que reservan el mismo espacio al mismo tiempo crean dos reservas **nuevas y distintas**, así que no chocan entre sí: el `@Version` de `Reserva` no las detecta. Por eso cada reserva nueva incrementa también la versión de la fila de agenda de su espacio, dentro de la misma transacción. Si dos transacciones parten de la misma versión, la segunda falla al hacer commit, se deshace y recibe 409. La agenda es el punto en común donde los dos pedidos tienen que chocar."
+
+Ideas clave por si repreguntan:
+
+- **`@Id` sin `@GeneratedValue`:** el id **es** el id del espacio; lo ponemos nosotros, no la base.
+- **Solo dos columnas:** `espacio_id` y `version`. No guarda nada más: su única función es tener una versión que incrementar.
+- **`@Getter` y no `@Data`:** no hay nada que modificar a mano; la versión la maneja JPA. Sin setters, nadie puede cambiarla por error.
+- **Constructor `AgendaEspacio(Long espacioId)`:** crea la fila la primera vez que se reserva un espacio. El constructor sin argumentos (`@NoArgsConstructor`) es el que exige JPA.
+- **Por qué no un `synchronized`:** solo protege dentro de una JVM. Con dos instancias de ms-reservas ya no sirve; el control tiene que estar en la base, que es lo compartido (D21).
+
+**Los DTOs: `CrearReservaRequest` y `ReservaDto`**
+
+> "`CrearReservaRequest` es lo que manda el usuario para reservar: espacio, inicio, fin, asistentes, actividad y, opcionalmente, el equipamiento que necesita. No trae el usuario: ese dato sale del token, a través del header `X-Usuario`, para que nadie pueda reservar a nombre de otro. `ReservaDto` es lo que devolvemos: la reserva con su id, el nombre del espacio, el dueño y el estado. El equipamiento viaja como texto (`Set<String>`) porque ms-reservas no necesita conocer la lista de valores posibles: se lo pasa tal cual a ms-espacios, que es quien la conoce."
+
+Ideas clave por si repreguntan:
+
+- **El usuario no va en el body:** si viniera en el JSON, cualquiera podría crear reservas a nombre de otro (D8). Lo pone el gateway, a partir del token ya validado.
+- **No tiene estado:** el estado inicial lo decide el service según la actividad (RN13), no el cliente.
+- **Solo validaciones de formato:** que vengan los campos y que haya al menos un asistente. Las reglas de fechas (RN1, RN2) y de capacidad (RN5) están en la cadena de validaciones, porque son reglas de negocio (422), no de formato (400).
+- **`version` no está en el DTO:** es un detalle interno del control de concurrencia; al cliente no le sirve.
+
+**Los repositorios: `ReservaRepository` y `AgendaEspacioRepository`**
+
+> "`ReservaRepository` tiene dos consultas escritas a mano con `@Query` en JPQL: `existeSuperposicion`, que dice si un espacio ya tiene una reserva activa que se pisa con la franja pedida (RN6), y `espaciosOcupados`, que devuelve los ids de los espacios ocupados en una franja, para la búsqueda de disponibles. Además tiene consultas derivadas del nombre para listar las reservas de un usuario, las de un estado y todas, ordenadas por inicio. `AgendaEspacioRepository` tiene `findByEspacioId` con `@Lock(OPTIMISTIC_FORCE_INCREMENT)`: al leer la fila de agenda, JPA queda obligado a incrementar su versión al hacer commit, aunque no cambie ningún dato. Eso es lo que hace chocar a dos reservas simultáneas del mismo espacio."
+
+Ideas clave por si repreguntan:
+
+- **Condición de superposición:** dos franjas se pisan si **cada una empieza antes de que termine la otra**: `r.inicio < :fin AND r.fin > :inicio`. Cubre todos los casos: se pisa por un borde, una contiene a la otra o son iguales.
+- **Franjas contiguas no se pisan:** una reserva de 10 a 12 y otra de 12 a 13 son válidas, porque las comparaciones son estrictas (`<` y `>`). Lo probamos.
+- **`r.estado IN :estados`:** se pasan los `ACTIVOS` (PENDIENTE y CONFIRMADA). Una reserva cancelada o rechazada no ocupa el espacio.
+- **JPQL, no SQL:** se escribe sobre las **entidades y sus campos** (`Reserva r`, `r.espacioId`), no sobre tablas y columnas. Hibernate lo traduce al SQL del motor.
+- **`:espacioId`:** parámetro con nombre; Spring lo une con el parámetro del método que se llama igual.
+- **`SELECT COUNT(r) > 0`:** la consulta devuelve directamente un `boolean`.
+- **`SELECT DISTINCT r.espacioId`:** solo los ids, sin repetir. Se devuelve un `Set<Long>` para preguntar después `ocupados.contains(id)`.
+- **Por qué `@Query` y no un nombre derivado:** la condición de superposición sería un nombre de método larguísimo e ilegible.
+- **`OPTIMISTIC_FORCE_INCREMENT`:** el bloqueo optimista normal incrementa la versión solo si la entidad cambió. Este modo la incrementa **siempre**, que es lo que necesitamos: la agenda no cambia ningún dato, pero cada reserva tiene que "tocarla". Lo probamos: dos lecturas en dos transacciones dejaron la versión en 2.
+
+**El cliente de ms-espacios (`EspaciosClient`): la colaboración entre microservicios**
+
+> "`EspaciosClient` es la forma en que ms-reservas le habla a ms-espacios, con `RestClient` por HTTP, y en un solo sentido (D2). Tiene dos métodos, uno por cada proceso colaborativo: `validar`, que al crear una reserva pregunta si un espacio concreto sirve para la franja, y `compatibles`, que en la búsqueda pide todos los espacios que sirven. Las respuestas de ms-espacios vienen envueltas en `ApiResponse`, así que se leen con un `ParameterizedTypeReference` para no perder el tipo genérico. Lo más importante es la traducción de errores: un 404 remoto se convierte en un 404 nuestro, un 400 remoto (por ejemplo, un equipamiento que no existe) en un 422, el 503 del clima en un 503 con el mismo mensaje, y si ms-espacios no responde o tarda más de 3 segundos, en un 503 'El servicio de espacios no está disponible'. Así el usuario siempre recibe un error claro, nunca un 500."
+
+Ideas clave por si repreguntan:
+
+- **Mismo `RestClient` que con Open-Meteo:** URL base de la configuración (`campus.ms-espacios-url`) y timeouts de 2 s para conectar y 3 s para leer (D3, D4).
+- **Records propios (`ValidacionEspacio` y `EspacioDisponible`):** ms-reservas no usa los DTOs de ms-espacios; declara sus propios records con los campos que necesita (D13). Jackson los llena por nombre de campo e ignora el resto (por ejemplo, el horario y las coordenadas que vienen en `EspacioDto`).
+- **`tipo` y `equipamiento` como texto:** ms-reservas no necesita conocer los enums de ms-espacios.
+- **`ParameterizedTypeReference<ApiResponse<ValidacionEspacio>>`:** en Java, los genéricos se borran al compilar (*type erasure*), así que `ApiResponse.class` no alcanza para decir "un `ApiResponse` de `ValidacionEspacio`". Esta clase anónima (`{ }`) conserva el tipo completo para que Jackson sepa qué construir.
+- **El orden de los `catch` importa:** del más específico al más general. `NotFound` es un `HttpClientErrorException`, que es un `RestClientException`. Si el `catch` general fuera primero, atraparía todo.
+- **`mensajeRemoto`:** lee el `message` del `ApiResponse` de error que mandó ms-espacios, y lo reusa. Así el usuario ve "No se pudo consultar el pronóstico del clima" o "Valor inválido para 'equipamiento': PILETA", y no un mensaje genérico.
+- **Por qué un 400 de ms-espacios se convierte en 422 y no en 400:** el pedido que recibió ms-reservas está bien formado (un `Set<String>`); lo que falla es que ese equipamiento no existe en el catálogo, y eso solo lo sabe ms-espacios. Es una regla del dominio del otro servicio.
+- **`contenido(r)`:** si ms-espacios responde 200 pero sin datos, es una respuesta inesperada → 503. Mismo criterio que con Open-Meteo.
+- **`queryParam("equipamiento", set.toArray())`:** con un arreglo, `RestClient` repite el parámetro (`equipamiento=PROYECTOR&equipamiento=PIZARRA`), que es como lo espera el controller de ms-espacios.
+- **`build(espacioId)`:** reemplaza `{id}` en el path por el valor, codificado.
+- **Qué pasa si ms-espacios está caído:** crear y buscar dan 503 (no se puede validar). Listar y cancelar siguen funcionando porque no lo llaman: usan el nombre copiado (D11).
+
+**Patrón Chain of Responsibility: la cadena de validaciones de una reserva nueva**
+
+> "Antes de guardar una reserva hay que controlar cinco cosas, en orden: que empiece en el futuro y dentro de 14 días (RN1), que dure entre 30 minutos y 4 horas en el mismo día (RN2), que el espacio sirva para esa franja, que lo decide ms-espacios (RN3, RN4, RN8 a RN12), que los asistentes entren en el espacio (RN5) y que no se pise con otra reserva activa (RN6). Cada control es un eslabón: una clase que extiende `ValidadorReserva` y hace una sola cosa en su método `verificar`. Si pasa, el pedido sigue al siguiente eslabón; si falla, lanza su excepción y la cadena se corta ahí. Spring nos entrega los cinco eslabones ordenados por `@Order`, y `CadenaValidacionReserva` los enlaza uno con otro al arrancar. El service solo llama a `cadena.validar(ctx)`."
+
+Ideas clave por si repreguntan:
+
+- **Chain of Responsibility en una frase:** un pedido pasa por una cadena de manejadores; cada uno hace su control y lo pasa al siguiente, o corta la cadena.
+- **Cada eslabón conoce solo al siguiente** (`siguiente`), no a toda la cadena. El primero no sabe cuántos hay después.
+- **`validar` es `final` y `verificar` es abstracto:** la clase base fija el recorrido (verificar y pasar al siguiente) y cada eslabón solo completa su control. Es un Template Method chiquito dentro del patrón.
+- **El orden importa, de lo barato a lo caro:** primero los controles locales e instantáneos (RN1, RN2), después la llamada HTTP a ms-espacios y al final la consulta a la base (RN6). Un pedido con una fecha de ayer no llega a llamar a ms-espacios: lo probamos, y con ms-espacios apagado RN1 y RN2 siguen respondiendo 422 al instante.
+- **RN5 va después del eslabón del espacio** porque necesita la capacidad, que la trae ms-espacios.
+- **`ContextoReserva`:** lo que viaja por la cadena. Lleva el pedido, el usuario y lo que los eslabones van averiguando: el eslabón remoto guarda ahí la validación del espacio, y el de capacidad y después el service la usan, sin volver a llamar a ms-espacios.
+- **`@Order(n)`:** Spring ordena la `List<ValidadorReserva>` que inyecta según esta anotación. Agregar una regla es agregar un eslabón con su `@Order`, sin tocar los demás.
+- **`enlazar` es de paquete (sin `public`):** solo `CadenaValidacionReserva`, que está en el mismo paquete, puede armar la cadena. Nadie de afuera puede reenlazarla.
+- **La cadena se arma una sola vez:** en el constructor de `CadenaValidacionReserva`, al arrancar. Los eslabones son beans únicos (*singleton*), así que el enlace dura toda la vida de la aplicación.
+- **`ReglasFranja`:** RN1 y RN2 están en una clase utilitaria (constructor privado, métodos `static`) porque las usan dos lugares: los dos primeros eslabones y la búsqueda de disponibles, que no pasa por la cadena.
+- **Por qué no Strategy acá:** Strategy elige **una** forma entre varias; acá se aplican **todas**, en orden (D17).
+- **Por qué no `if` seguidos en `crear()`:** un método largo que mezcla todas las reglas, difícil de probar y de extender (D17).
+- **Por qué no Bean Validation:** sirve para el formato de un campo (`@NotNull`), no para reglas que consultan la base u otro servicio (D17).
+
+**`ReservaService`**
+
+> "Es la lógica de ms-reservas. Para crear una reserva hace tres cosas dentro de una transacción: toma la agenda del espacio (RN15), pasa el pedido por la cadena de validaciones y decide el estado inicial: PENDIENTE si es un evento y CONFIRMADA si no (RN13). Después guarda la reserva con el nombre del espacio que trajo ms-espacios. Aprobar, rechazar y cancelar buscan la reserva y piden el cambio de estado a `cambiarEstado`, que pregunta al enum si la transición es válida; si no, 409 (RN14). Cancelar además controla que la reserva sea del usuario (403) y que no haya empezado (422), que es RN7. La búsqueda de disponibles pide a ms-espacios los compatibles y descarta los que ya tienen una reserva activa en esa franja."
+
+Ideas clave por si repreguntan:
+
+- **Todo `crear` es una sola transacción (`@Transactional`):** si cualquier eslabón de la cadena falla, se deshace todo, incluida la fila de agenda que se haya creado. La reserva se guarda o no se guarda; nunca queda a medias.
+- **`tomarAgenda` va primero:** lee la fila de agenda con `OPTIMISTIC_FORCE_INCREMENT`, así esta transacción queda "anotada" para incrementar su versión al hacer commit. Si es la primera reserva del espacio, la crea con `saveAndFlush` (`flush` para que el `INSERT` se haga en ese momento, y un choque se detecte enseguida).
+- **Qué pasa con dos pedidos simultáneos:** los dos pasan la cadena, pero al hacer commit solo uno puede subir la versión de la agenda. El otro recibe `ObjectOptimisticLockingFailureException`, se deshace (su reserva no queda guardada) y responde 409. Si era la primera reserva del espacio, los dos intentan insertar la misma fila de agenda y el segundo recibe `DataIntegrityViolationException` (clave repetida), que también es 409.
+- **Lo probamos con hilos simultáneos:** 2 y 5 pedidos idénticos al mismo tiempo → **siempre una sola reserva guardada**. Y **sin la agenda**, 5 pedidos simultáneos guardaron **5 reservas en la misma franja** del mismo espacio. Esa es la prueba de que hace falta.
+- **Los cambios de estado no llaman a `save`:** dentro de una transacción, la entidad leída está "administrada" por JPA, que detecta los cambios (*dirty checking*) y hace el `UPDATE` al hacer commit. Ahí también se aplica el `@Version` de la reserva.
+- **Orden de los controles en `cancelar`:** primero que exista (404), después que sea tuya (403), después que no haya empezado (422) y por último que la transición sea válida (409). Así nadie puede averiguar el estado de una reserva ajena.
+- **`disponibles` no pasa por la cadena:** no hay un espacio concreto. Reusa RN1 y RN2 (`ReglasFranja`), le pide a ms-espacios los compatibles y descarta los ocupados con una sola consulta (`espaciosOcupados`), sin una consulta por espacio.
+- **Por qué la búsqueda necesita a los dos servicios:** ms-espacios sabe qué espacios sirven, pero no cuáles están ocupados; ms-reservas sabe la ocupación, pero no conoce el catálogo ni el clima.
+
+**`ReservaController`**
+
+> "Expone la API de reservas bajo `/api/reservas`: `POST` para crear, `GET /mias` para las propias, `GET` (con `?estado=` opcional) para que bedelía vea todas, `PATCH /{id}/aprobar`, `/{id}/rechazar` y `/{id}/cancelar` para los cambios de estado, y `GET /disponibilidad` para buscar espacios libres. El usuario llega en el header `X-Usuario`, que pone el gateway a partir del token; el controller lo lee con `@RequestHeader` y se lo pasa al service. Como en ms-espacios, el controller no tiene lógica ni `try/catch`: los errores los traducen el `GlobalExceptionHandler` del JAR común y el `ConcurrenciaExceptionHandler`."
+
+Ideas clave por si repreguntan:
+
+- **`@RequestHeader("X-Usuario")`:** lee un header HTTP del pedido. Es obligatorio: sin él, 400 "Falta el header obligatorio 'X-Usuario'".
+- **¿Y si el cliente manda un `X-Usuario` falso?** Desde afuera no puede: el gateway borra cualquier `X-Usuario` que venga del cliente y pone el del token. Y los microservicios no publican puertos, así que solo se llega a ellos a través del gateway (trusted zone, D6 y D8). Hasta la fase 3 lo completamos a mano en Swagger.
+- **`PATCH` para los cambios de estado:** modifica **una parte** del recurso (su estado), no lo reemplaza entero como `PUT`. La acción va en la ruta (`/aprobar`, `/cancelar`) porque cada una tiene reglas distintas.
+- **Quién puede llamar a cada endpoint no se controla acá:** lo decide el gateway por rol (fase 3). El controller solo recibe pedidos ya autorizados.
+- **`/mias` y `/disponibilidad` son rutas literales:** Spring las prefiere antes que `/{id}`, igual que en ms-espacios.
+- **`?estado=PENDIENTE` es opcional (`required = false`):** sin él, todas las reservas.
+
+**`ConcurrenciaExceptionHandler`: el 409 de RN15**
+
+> "Cuando dos pedidos chocan, la excepción no la lanza nuestro código, sino JPA, y recién al hacer commit, cuando el método del service ya terminó: por eso no se puede atrapar con un `try/catch` dentro del service. La atrapa un `@RestControllerAdvice` propio de ms-reservas, que traduce `OptimisticLockingFailureException` (la versión de la agenda o de la reserva cambió) y `DataIntegrityViolationException` (dos pedidos crearon a la vez la fila de agenda de un espacio) a 409 con un mensaje que invita a reintentar."
+
+Ideas clave por si repreguntan:
+
+- **Por qué no está en el JAR común:** solo ms-reservas tiene control de concurrencia. ms-espacios no lo necesita.
+- **`@Order(Ordered.HIGHEST_PRECEDENCE)`:** si en algún momento otro handler atrapara una excepción más general, este se evalúa primero.
+- **`OptimisticLockingFailureException`:** es la excepción de Spring que envuelve la de JPA. La que realmente aparece es su subclase `ObjectOptimisticLockingFailureException`, y el handler la atrapa por herencia.
+- **El mensaje dice "Intentá de nuevo":** RN15 dice que el que pierde "recibe 409 y puede reintentar". Si reintenta, ahora RN6 ve la reserva del ganador y responde 409 por superposición, o se guarda si era otra franja.
+- **Lo probamos con dos `POST` idénticos en paralelo:** uno 201 y el otro 409.
+
+**¿De dónde salen esas dos excepciones?**
+
+> "No las lanza nuestro código: nacen en la base o en Hibernate, y Spring las traduce a su propia jerarquía de excepciones de acceso a datos (`DataAccessException`). `OptimisticLockingFailureException` sale al hacer commit: Hibernate ejecuta `UPDATE agenda_espacio SET version = 6 WHERE espacio_id = 1 AND version = 5`, la base responde que modificó 0 filas porque otro ya cambió la versión, Hibernate lanza `StaleObjectStateException` y el administrador de transacciones de Spring la traduce. `DataIntegrityViolationException` sale cuando dos pedidos insertan a la vez la fila de agenda de un espacio nuevo: el segundo `INSERT` viola la clave primaria, el driver de H2 lanza una `SQLException`, Hibernate la envuelve en su `ConstraintViolationException` y el repositorio de Spring Data la traduce. Nosotros atrapamos las excepciones de Spring, no las de Hibernate ni las de H2, así que el handler funcionaría igual con otra base o con otro proveedor de JPA."
+
+El recorrido de cada una:
+
+| | `OptimisticLockingFailureException` | `DataIntegrityViolationException` |
+|---|---|---|
+| **Cuándo** | Al hacer **commit** (ya terminó el método del service) | En `saveAndFlush` (todavía dentro del service) |
+| **SQL que falla** | `UPDATE ... WHERE version = ?` → **0 filas** | `INSERT` con una clave primaria repetida |
+| **Quién detecta el problema** | **Hibernate**: la base no da error, solo informa 0 filas | **La base (H2)**: rechaza el `INSERT` |
+| **Excepción original** | `org.hibernate.StaleObjectStateException` | `JdbcSQLIntegrityConstraintViolationException` (de H2) → `org.hibernate.exception.ConstraintViolationException` |
+| **Quién la traduce** | `JpaTransactionManager` (el que hace el commit de `@Transactional`) | El *proxy* del repositorio de Spring Data |
+| **La que nos llega** | `ObjectOptimisticLockingFailureException` | `DataIntegrityViolationException` |
+
+Ideas clave por si repreguntan:
+
+- **Jerarquía de Spring:** `RuntimeException` → `DataAccessException` → (`ConcurrencyFailureException` → `OptimisticLockingFailureException` → `ObjectOptimisticLockingFailureException`) y (`NonTransientDataAccessException` → `DataIntegrityViolationException`).
+- **Por qué Spring las traduce:** cada base y cada proveedor de JPA tiene sus propias excepciones y códigos de error. Spring las convierte a una jerarquía común, así el código no depende de H2 ni de Hibernate.
+- **Optimista no espera, la clave primaria sí:** con la versión, nadie se bloquea; el choque se detecta al final. Con el `INSERT` repetido, H2 hace esperar al segundo hasta que el primero confirma, y recién ahí lo rechaza.
+- **Las dos son `RuntimeException`:** por eso hacen rollback de la transacción, y la reserva del perdedor no queda guardada.
+- **"Transitoria" vs. "no transitoria":** Spring clasifica el choque de versiones como transitorio (si reintentás, puede funcionar) y la violación de integridad como no transitoria (el mismo `INSERT` va a fallar siempre). En nuestro caso las dos se resuelven reintentando, porque el reintento ya no es el mismo pedido: la fila de agenda ya existe.
 
 ---
 
@@ -568,3 +763,97 @@ Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las
   - Con Open-Meteo caído (`OPEN_METEO_URL=http://localhost:9`): la validación de la cancha da 503 y compatibles la omite, devolviendo igual las aulas.
   - Reiniciar el servicio no duplica los espacios.
 - **Por qué:** es lo que el plan pide para dar por cerrada la fase, y lo que se muestra en la demo.
+
+### ms-reservas: modelo
+
+**T43. Enums de `Reserva` como `VARCHAR`, igual que en ms-espacios**
+- **Decisión:** `estado` y `actividad` llevan `@JdbcTypeCode(SqlTypes.VARCHAR)`.
+- **Por qué:** mismo problema que T18: H2 crearía columnas `ENUM(...)` con la lista fija, y `ddl-auto: update` no las amplía. Si se agrega un estado (el plan menciona FINALIZADA como posible mejora) o una actividad, la base lo rechazaría. Lo verificamos: las dos columnas quedaron `CHARACTER VARYING`.
+- **Descartamos:** dejar el comportamiento por defecto, que obligaría a borrar la base para agregar un valor.
+
+**T44. `AgendaEspacio` solo con `@Getter`, sin setters**
+- **Decisión:** a diferencia de `Reserva` (`@Data`), la agenda no tiene setters.
+- **Por qué:** sus dos campos no se modifican nunca a mano: el id se fija al crearla y la versión la incrementa JPA. Sin setters, nadie puede romper el control de concurrencia por error. Es lo que propone el plan.
+
+**T45. Los listados de reservas salen ordenados por inicio**
+- **Decisión:** `findByUsuarioOrderByInicioAsc`, `findByEstadoOrderByInicioAsc` y `findAllByOrderByInicioAsc`.
+- **Por qué:** sin `ORDER BY`, la base devuelve las filas en cualquier orden. Un usuario que mira sus reservas, o bedelía que mira los eventos pendientes, espera verlas por fecha.
+- **Descartamos:** los `findByEstado` y `findAll` del plan sin orden, y ordenar en Java después de traerlas.
+
+**T46. Probamos las consultas de los repositorios**
+- **Decisión:** antes de usarlas, probamos `existeSuperposicion` con franjas que se pisan, que se tocan en el borde, que contienen a otra y con una reserva cancelada; `espaciosOcupados`; los tres listados ordenados; y que `OPTIMISTIC_FORCE_INCREMENT` sube la versión de la agenda en cada transacción. Todo dio lo esperado.
+- **Por qué:** RN6 y RN15 dependen de estas consultas. Un `<` cambiado por `<=` haría que dos reservas contiguas (10 a 12 y 12 a 13) se rechacen.
+
+### ms-reservas: cliente de ms-espacios
+
+**T47. Un 4xx de ms-espacios (que no sea 404) se traduce a 422, no a 503**
+- **Decisión:** `EspaciosClient` atrapa `HttpClientErrorException` (después de `NotFound`) y lanza `ReglaNegocioException`.
+- **Por qué:** en el código del plan, cualquier error que no fuera 404 o 503 caía en el `catch (RestClientException)` y daba **503 "El servicio de espacios no está disponible"**. Pero si el usuario pide `"equipamiento": ["PILETA"]`, ms-espacios responde 400, y decir que el servicio está caído sería mentir: el servicio anda, el pedido no sirve. Lo probamos: con la versión del plan sería 503; con la nuestra, 422 "Valor inválido para 'equipamiento': PILETA".
+- **Descartamos:** devolver 400, que exigiría otra excepción en el JAR común; y validar el equipamiento en ms-reservas, que lo obligaría a conocer el catálogo de otro servicio.
+
+**T48. Se reusa el mensaje de error de ms-espacios**
+- **Decisión:** `mensajeRemoto` lee el `message` del `ApiResponse` de error que respondió ms-espacios y lo usa en nuestra excepción. Si no puede leerlo, usa un mensaje por defecto.
+- **Por qué:** ms-espacios ya explica qué pasó ("No se pudo consultar el pronóstico del clima", "Valor inválido para 'equipamiento': PILETA"). Reescribirlo perdería información; es posible porque los dos servicios usan el mismo `ApiResponse` del JAR común.
+- **Descartamos:** los mensajes fijos del plan, que en el caso del clima son parecidos, pero en el caso de un 400 no dirían qué valor estaba mal.
+
+**T49. Una respuesta 200 sin datos también es 503**
+- **Decisión:** si ms-espacios responde sin cuerpo o sin `responseValue`, lanzamos `ServicioNoDisponibleException("Respuesta inesperada del servicio de espacios")`.
+- **Por qué:** sin este control, el plan haría `.responseValue()` sobre `null` → `NullPointerException` → 500. Mismo criterio que validar la respuesta de Open-Meteo.
+
+**T50. `ValidacionEspacio` y `EspacioDisponible` van en el paquete `clients`**
+- **Decisión:** igual que T25: los records que describen la respuesta de otro servicio viven junto a su cliente, no con nuestros DTOs.
+
+**T51. Probamos el cliente contra ms-espacios de verdad**
+- **Decisión:** levantamos ms-espacios en tres situaciones y probamos `validar` y `compatibles` en cada una:
+  - **Normal:** espacio que sirve (`disponible: true`), que no sirve (`false` con el motivo), espacio 999 (404) y equipamiento PILETA (422).
+  - **Con Open-Meteo caído:** la cancha da 503 "No se pudo consultar el pronóstico del clima", y las aulas siguen funcionando.
+  - **Con ms-espacios apagado:** todo da 503 "El servicio de espacios no está disponible".
+
+### ms-reservas: cadena de validaciones
+
+**T52. La cadena vive en el subpaquete `services.validadores`**
+- **Decisión:** `ValidadorReserva`, los cinco eslabones, `ContextoReserva`, `CadenaValidacionReserva` y `ReglasFranja` van juntos en `services/validadores/`, igual que las estrategias de ms-espacios (T27).
+- **Por qué:** son las piezas de un mismo patrón. Además, `enlazar` es de paquete: solo puede llamarlo una clase del mismo paquete, y así únicamente `CadenaValidacionReserva` puede armar la cadena.
+
+**T53. Probamos la cadena con un caso por regla**
+- **Decisión:** antes del service probamos once casos: uno válido y uno por cada regla (RN1 con fecha pasada y a 20 días, RN2 con 15 minutos, 5 horas y fin antes del inicio, RN3, RN9, RN5, RN6 y espacio 999). Todos dieron la excepción esperada. Además confirmamos que Spring arma la cadena en el orden de `@Order`.
+- **El orden se nota:** con ms-espacios apagado, los casos de RN1 y RN2 siguieron dando 422 en 0 ms, porque se cortan antes de llegar al eslabón remoto. Los demás dieron 503.
+
+### ms-reservas: service
+
+**T54. La búsqueda de disponibles controla que los asistentes sean más de 0**
+- **Decisión:** `disponibles` lanza 422 si `asistentes <= 0`.
+- **Por qué:** con 0 o un número negativo, ms-espacios devolvería todos los espacios (capacidad ≥ 0), y la búsqueda no tendría sentido. En `crear` ya lo controla `@Positive` del request; la búsqueda recibe parámetros sueltos y no pasa por esa validación.
+
+**T55. "La reserva ya empezó" es 422, no 409**
+- **Decisión:** aprobar o cancelar una reserva que ya empezó da 422, como en el plan.
+- **Por qué:** no es una transición que el diagrama prohíba (PENDIENTE → CONFIRMADA está permitida); es una regla de tiempo (RN7 y "aprobar antes del inicio" de RN14). El 409 queda para las transiciones que el diagrama no permite.
+
+**T56. Probamos el service, incluida la concurrencia con hilos**
+- **Decisión:** probamos el ciclo completo (clase → CONFIRMADA, evento → PENDIENTE, aprobar, aprobar otra vez → 409, rechazar una confirmada → 409, cancelar ajena → 403, cancelar → CANCELADA, cancelar dos veces → 409, reserva 999 → 404), la búsqueda (devuelve el Aula 101 y, después de reservarla, nada) y la concurrencia con 2 y 5 hilos simultáneos.
+- **Resultado de la concurrencia:** con la agenda, siempre se guardó **una sola** reserva por franja; los demás pedidos recibieron `ObjectOptimisticLockingFailureException` o, en la primera reserva de un espacio, `DataIntegrityViolationException`. **Sin la agenda**, 5 pedidos simultáneos guardaron **5 reservas** en la misma franja. Es la demostración de por qué existe `AgendaEspacio`.
+- **Pendiente:** esas dos excepciones todavía salen como 500. Las traduce a 409 el `ConcurrenciaExceptionHandler`, en el paso del controller.
+
+### ms-reservas: controller y cierre de la Fase 2
+
+**T57. Un header obligatorio que falta también sale con `ApiResponse`**
+- **Decisión:** el `GlobalExceptionHandler` del JAR común maneja `MissingRequestHeaderException` y responde 400 "Falta el header obligatorio 'X-Usuario'".
+- **Por qué:** mismo motivo que T37. Sin este handler, un pedido sin `X-Usuario` daba 400 con el formato por defecto de Spring, sin decir qué faltaba. Va en el JAR común porque es transversal: cualquier servicio que use un header obligatorio lo necesita.
+- **Descartamos:** dejarlo solo en ms-reservas, que es el único que hoy usa headers: la regla es que el formato de error sea uno solo para todo el sistema.
+
+**T58. `ConcurrenciaExceptionHandler` va en el paquete `controllers`**
+- **Decisión:** el handler de concurrencia vive junto a `ReservaController`.
+- **Por qué:** traduce errores a respuestas HTTP, que es trabajo de la capa web. Es propio de ms-reservas (no va al JAR común) porque solo este servicio tiene control de concurrencia.
+
+**T59. Verificamos el criterio de terminado de la Fase 2 por HTTP**
+- **Decisión:** con ms-espacios y ms-reservas corriendo, recorrimos la tabla 6.8 del plan con pedidos HTTP reales. Todos dieron el código esperado:
+  - Búsqueda de una clase para 30 personas con proyector → 200 con el Aula 101; después de reservarla → 200 con lista vacía.
+  - Reserva válida → 201 CONFIRMADA.
+  - RN1 (ayer y a 20 días), RN2 (15 minutos y 5 horas), RN3, RN5, RN8, RN9, RN10, RN11 y RN12 → 422 con su motivo.
+  - RN6 (misma franja, y en la franja del evento pendiente) → 409.
+  - RN7 (usuario2 cancela la de usuario1) → 403.
+  - RN13: el evento nace PENDIENTE, aparece en `?estado=PENDIENTE`, el ADMIN lo aprueba → CONFIRMADA. RN14: aprobarlo otra vez → 409.
+  - RN15: dos `POST` idénticos en paralelo → uno 201 y el otro 409.
+  - Cancelar dos veces → 409; espacio 999 → 404; equipamiento PILETA → 422; sin header → 400; estado inválido → 400.
+  - **ms-espacios apagado:** crear y buscar → 503; `GET /mias` → 200, con los nombres de los espacios (D11).
+- **Lo que no corrimos acá:** RN4 con lluvia (`CLIMA_UMBRAL=0`). Ya está probado en ms-espacios (T42), y ms-reservas solo reenvía su motivo.

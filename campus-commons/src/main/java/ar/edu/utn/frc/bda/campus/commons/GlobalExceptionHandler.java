@@ -11,6 +11,8 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+
+import org.springframework.web.bind.MissingRequestHeaderException;
 /**
  * Traduce las excepciones de negocio a respuestas HTTP con ApiResponse.
  * Se aplica a todos los controllers del microservicio que use este JAR.
@@ -71,6 +73,13 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> jsonInvalido(HttpMessageNotReadableException ex) {
         return ResponseEntity.badRequest().body(ApiResponse.create(false, null,
                 "El cuerpo del pedido no es un JSON válido o tiene un valor que no corresponde"));
+    }
+
+        /** Falta un @RequestHeader obligatorio (por ejemplo X-Usuario) → 400. */
+    @ExceptionHandler(MissingRequestHeaderException.class)
+    public ResponseEntity<ApiResponse<Void>> faltaHeader(MissingRequestHeaderException ex) {
+        return ResponseEntity.badRequest().body(ApiResponse.create(false, null,
+                "Falta el header obligatorio '" + ex.getHeaderName() + "'"));
     }
 
     private ResponseEntity<ApiResponse<Void>> error(HttpStatus status, RuntimeException ex) {
