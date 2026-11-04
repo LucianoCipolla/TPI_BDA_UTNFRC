@@ -4,6 +4,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Set;
 
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -51,6 +52,7 @@ public class EspacioController {
     }
 
     @PostMapping
+    @ResponseStatus(HttpStatus.CREATED) // para que Swagger muestre 201 (el código lo pone igual el ResponseEntity)
     @Operation(summary = "Crear un espacio (ADMIN)",
             description = "201 si se crea; 400 si faltan datos; 422 si la apertura no es anterior al cierre")
     public ResponseEntity<ApiResponse<EspacioDto>> crear(@Valid @RequestBody EspacioRequest req) {
@@ -73,8 +75,9 @@ public class EspacioController {
     }
 
     @GetMapping("/{id}/validacion")
-    @Operation(summary = "¿Sirve este espacio para la franja? (lo usa ms-reservas)",
-            description = "200 con disponible true o false y el motivo; 404 si no existe; 503 si es una cancha y no hay pronóstico")
+    @Operation(summary = "¿Sirve este espacio para la franja? (lo usa ms-reservas)", 
+    description = "200 con disponible true o false y el motivo; 400 si un parámetro es inválido; 404 si no existe; "
+            + "422 si la franja está mal armada; 503 si es una cancha y no hay pronóstico")
     public ResponseEntity<ApiResponse<ValidacionDto>> validar(
             @PathVariable Long id,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime inicio,
@@ -86,8 +89,9 @@ public class EspacioController {
     }
 
     @GetMapping("/compatibles")
-    @Operation(summary = "Espacios que sirven para la franja y el pedido (lo usa ms-reservas)",
-            description = "Capacidad, actividad, equipamiento, horario y, en canchas, clima. Si no hay pronóstico, las canchas se omiten")
+    @Operation(summary = "Espacios que sirven para la franja y el pedido (lo usa ms-reservas)", 
+    description = "Capacidad, actividad, equipamiento, horario y, en canchas, clima. Si no hay pronóstico, las canchas se omiten. "
+            + "400 si un parámetro es inválido; 422 si la franja está mal armada")
     public ResponseEntity<ApiResponse<List<EspacioDto>>> compatibles(
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime inicio,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fin,
