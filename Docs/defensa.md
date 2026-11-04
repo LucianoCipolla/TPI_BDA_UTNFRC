@@ -107,7 +107,10 @@ Ideas clave por si repreguntan:
 - **Los otros cuatro 400:** parámetro obligatorio que falta, parámetro que no se puede convertir (`actividad=NADAR`), JSON ilegible o con un enum inválido, y header obligatorio que falta (`X-Usuario`). Sin estos handlers, Spring responde 400 con su propio formato y sin explicar qué está mal (T37 y T57).
 - **`UNPROCESSABLE_CONTENT` y no `UNPROCESSABLE_ENTITY`:** es el mismo 422. Spring 7 renombró la constante siguiendo la especificación HTTP actual (RFC 9110) y marcó la vieja como *deprecated*. El plan usa el nombre viejo.
 - **Por qué el `pom.xml` también tiene `spring-context`:** `MethodArgumentNotValidException` está en `spring-web`, pero hereda de `BindException` y devuelve un `BindingResult`, que están en `spring-context` (paquete `org.springframework.validation`). `spring-web` no trae `spring-context`, así que sin esa dependencia no compila ("cannot access org.springframework.validation.BindException"). Va `provided` por el mismo motivo que `spring-web`: los microservicios ya lo tienen.
-- **Excepciones no previstas (500):** si salta una que no tiene handler (por ejemplo, un `NullPointerException`), Spring responde 500 con su formato por defecto. No la atrapamos a propósito: un 500 indica un bug que hay que corregir, no un error de negocio.
+- **Excepciones no previstas (500):** el método `inesperado`, con `@ExceptionHandler(Exception.class)`, atrapa todo lo que no tiene un handler propio. Si es una excepción de Spring que ya sabe su código (una ruta que no existe → 404, un método no permitido → 405), lo conserva. Si es un error nuestro (por ejemplo, un `NullPointerException`), responde **500** "Error interno del servidor", con nuestro `ApiResponse`, y escribe el stack trace completo en el log con nivel ERROR. Sigue siendo un 500 a propósito: indica un bug que hay que corregir, no un error de negocio (T10).
+- **`ErrorResponse`:** es la interfaz que implementan las excepciones de Spring MVC que saben su propio código HTTP (`NoResourceFoundException`, `HttpRequestMethodNotSupportedException`…). Con `ex instanceof ErrorResponse er` se pregunta eso y, en el mismo paso, se la usa para leer el código y el detalle.
+- **Por qué el 500 no muestra el mensaje real:** el detalle de un error interno (un `NullPointerException`, un nombre de tabla) no le sirve al cliente y puede mostrar cómo está hecho el sistema por dentro. Por eso el mensaje es genérico, y el detalle queda en el log para nosotros.
+- **El handler también loguea:** ver la sección "Logs".
 
 ---
 
@@ -624,6 +627,42 @@ Ideas clave por si repreguntan:
 
 ---
 
+## Logs
+
+**Qué registramos y para qué**
+
+> "Los dos microservicios escriben en su consola qué pasó con cada pedido importante, usando SLF4J, la interfaz de logs estándar de Java que trae Spring Boot (por debajo escribe Logback). Registramos tres tipos de cosas. Lo que el negocio hizo: cada reserva creada, aprobada, rechazada o cancelada, con quién y qué espacio. Cada error que devolvemos, con su código y su motivo: un 422 por una regla, un 409 por superposición, un 403 por una reserva ajena. Y las fallas de las dependencias: si ms-espacios u Open-Meteo no responden, queda escrito qué se pidió y qué error dio la conexión, aunque al usuario le llegue solo un 503 con un mensaje corto. Sirve para seguir qué pasa durante la demo y para diagnosticar un problema sin tener que reproducirlo."
+
+Dónde se loguea:
+
+| Dónde | Nivel | Qué dice (ejemplo real) |
+|---|---|---|
+| `ReservaService` (ms-reservas) | INFO | `Reserva 1 creada por usuario1: espacio 1 (Aula 101), 2026-11-06T10:00 a 2026-11-06T12:00, CONFIRMADA` |
+| `ReservaService` | INFO | `Reserva 2 aprobada por bedelía` · `Reserva 4 rechazada por bedelía` · `Reserva 1 cancelada por usuario1` |
+| `GlobalExceptionHandler` (JAR común, los dos servicios) | INFO | `422 Las salas se reservan por un máximo de 2 horas` · `409 El espacio ya está reservado en esa franja` · `403 La reserva no es tuya` · `404 No existe el espacio 99` |
+| `GlobalExceptionHandler` | WARN | `503 El servicio de espacios no está disponible` |
+| `GlobalExceptionHandler` | ERROR | `Error inesperado` + el stack trace completo (un bug: el cliente recibe 500) |
+| `EspaciosClient` (ms-reservas) | WARN | `ms-espacios no respondió al validar el espacio 2: I/O error ... Connection refused` |
+| `OpenMeteoClient` (ms-espacios) | WARN | `Open-Meteo no respondió para (-31.44, -64.19): ...` · `Open-Meteo devolvió una respuesta incompleta ...` |
+| `EspacioService` (ms-espacios) | WARN | `Se omite 'Cancha de fútbol' de la búsqueda: No se pudo consultar el pronóstico del clima` |
+| `ConcurrenciaExceptionHandler` (ms-reservas) | INFO | `409 choque de concurrencia: ObjectOptimisticLockingFailureException` |
+
+Ideas clave por si repreguntan:
+
+- **SLF4J:** es una **fachada**: el código usa su interfaz (`Logger`, `log.info(...)`) y la implementación concreta la pone Spring Boot (Logback). Si mañana se cambia la implementación, el código no cambia.
+- **`@Slf4j` (Lombok):** genera `private static final Logger log = LoggerFactory.getLogger(MiClase.class);`. En el JAR común se escribe a mano, porque `campus-commons` no usa Lombok.
+- **`slf4j-api` con `scope provided` en `campus-commons`:** igual que `spring-web`: el JAR común compila contra la interfaz, y la implementación la aporta el microservicio que lo usa (T7).
+- **Los `{}`:** son lugares que SLF4J completa con los argumentos, en orden. Es mejor que concatenar con `+`: si el nivel está apagado, no se arma el texto.
+- **Por qué cada nivel:**
+  - **INFO** para lo que es normal en el sistema: crear y cancelar reservas, o rechazar un pedido que no cumple una regla (un 4xx no es una falla nuestra, es el sistema funcionando).
+  - **WARN** cuando falla algo de lo que dependemos (5xx, ms-espacios u Open-Meteo caídos): hay que mirarlo, pero el sistema respondió bien.
+  - **ERROR** solo para un bug nuestro (500), con el stack trace para encontrarlo.
+- **El usuario no ve el detalle técnico; el log sí:** al cliente le llega "El servicio de espacios no está disponible"; en el log queda "Connection refused" y la URL. Así no mostramos cómo está armado el sistema por dentro, y nosotros igual podemos diagnosticar.
+- **`logging.level.ar.edu.utn.frc.bda.campus: ${LOG_LEVEL:INFO}`:** fija el nivel de **nuestro** código, sin tocar el de Spring o Hibernate. Por defecto INFO; con la variable de entorno `LOG_LEVEL=WARN` quedan solo las fallas. Es el mismo patrón `${VARIABLE:defecto}` del resto de la configuración (T15).
+- **No logueamos datos sensibles:** ni tokens ni contraseñas, solo el nombre de usuario (que ya está en la reserva).
+
+---
+
 ## Decisiones que tomamos
 
 Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las D1 a D25 del plan de desarrollo, y algunas se apoyan en ellas.
@@ -679,10 +718,11 @@ Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las
 - **Por qué:** en Spring 7, `UNPROCESSABLE_ENTITY` está *deprecated* y fue reemplazada por `UNPROCESSABLE_CONTENT`, el nombre que usa la especificación HTTP actual (RFC 9110). Es el mismo código 422.
 - **Descartamos:** la constante del plan, que compila pero con un warning y desaparecerá en una versión futura.
 
-**T10. Sin handler genérico para errores no previstos**
-- **Decisión:** el `GlobalExceptionHandler` no atrapa `Exception`. Un error inesperado sale como 500.
-- **Por qué:** un 500 significa "hay un bug en nuestro código". Queremos que se note para corregirlo, no disfrazarlo de error de negocio.
-- **Descartamos:** un `@ExceptionHandler(Exception.class)` que devuelva un 400 o un 422 genérico: escondería errores reales.
+**T10. Handler genérico que conserva el código: los errores no previstos siguen siendo 500**
+- **Decisión:** el `GlobalExceptionHandler` atrapa `Exception` (método `inesperado`), pero **no cambia el significado del error**: las excepciones de Spring conservan su código (404, 405…) y cualquier otra sale como 500 "Error interno del servidor", con el stack trace en el log (nivel ERROR).
+- **Por qué:** un 500 significa "hay un bug en nuestro código", y queremos que se note para corregirlo. Lo que ganamos con el handler es que **todas** las respuestas, también las de error inesperado y las de rutas que no existen, salen con el mismo `ApiResponse` (D25), y que el bug queda registrado con su stack trace.
+- **Historia:** al principio no lo teníamos (un error inesperado salía como 500 con el formato por defecto de Spring). Lo agregamos junto con los logs, en el commit `feat: logs`.
+- **Descartamos:** un `@ExceptionHandler(Exception.class)` que devuelva un 400 o un 422 genérico: escondería errores reales detrás de un "el pedido está mal".
 
 **T11. El código HTTP no va dentro de `ApiResponse`**
 - **Decisión:** el código viaja solo en la línea de estado HTTP.
@@ -1003,3 +1043,20 @@ Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las
   - **admin1 crea una reserva → 403:** la ruta es solo para USUARIO.
   - **Ruta que no existe (`/api/otra`) con token válido → 403:** la corta `denyAll()`; nunca llega a ningún servicio.
 - **Lo que no corrimos acá:** el token **vencido** (los de Keycloak duran 5 minutos; el modificado a mano prueba el mismo camino, la firma o los claims no validan) y la colección de Postman, que queda para la Fase 4 junto con el resto de la documentación.
+
+### Logs
+
+**T65. Un nivel de log por tipo de situación: INFO, WARN y ERROR**
+- **Decisión:** los 4xx y las acciones del negocio van con INFO; las fallas de ms-espacios y de Open-Meteo, y los 5xx, con WARN; un error inesperado (500), con ERROR y su stack trace.
+- **Por qué:** el nivel dice qué tan urgente es. Un 422 no es un problema del sistema, es una regla cumpliéndose; que ms-espacios no responda sí hay que mirarlo; un 500 es un bug. Con `LOG_LEVEL=WARN` se ve de un vistazo solo lo que falló.
+- **Descartamos:** loguear todo como ERROR (taparía los problemas reales) o los 4xx como WARN (en una demo, cada regla probada parecería una falla).
+
+**T66. El nivel de nuestro código se cambia con `LOG_LEVEL`, sin tocar el de Spring**
+- **Decisión:** `logging.level.ar.edu.utn.frc.bda.campus: ${LOG_LEVEL:INFO}` en los dos microservicios.
+- **Por qué:** permite bajar el ruido para la demo, o cambiar el nivel en Docker con una variable de entorno, sin recompilar. Al aplicarse solo a nuestro paquete, los logs de arranque de Spring y Hibernate no cambian.
+- **Aclaración:** hoy no tenemos ningún `log.debug`, así que `LOG_LEVEL=DEBUG` no muestra nada extra de nuestro código (el comentario del `application.yaml` lo anticipa para cuando se agreguen). Los valores útiles son INFO, el de siempre, y WARN, que deja solo las fallas.
+
+**T67. Lo que no se loguea, y por qué**
+- **Los 400:** los handlers de formato (`@Valid`, parámetro o header faltante, tipo inválido, JSON ilegible) responden directo, sin pasar por `error(...)`, así que no dejan línea en el log. Es aceptable: un 400 es un error del cliente que ya recibe el detalle en la respuesta.
+- **El gateway:** no le agregamos logs propios. Un 401 o un 403 no aparecen en ninguna terminal; se ven en la respuesta. Los pedidos que pasan sí dejan su rastro en el microservicio al que llegan.
+- **Datos sensibles:** nunca se loguean tokens ni contraseñas.
