@@ -25,8 +25,10 @@ import ar.edu.utn.frc.bda.campus.reservas.services.validadores.CadenaValidacionR
 import ar.edu.utn.frc.bda.campus.reservas.services.validadores.ContextoReserva;
 import ar.edu.utn.frc.bda.campus.reservas.services.validadores.ReglasFranja;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 /** Ciclo de vida de la reserva: crear, aprobar, rechazar, cancelar, listar y buscar disponibles. */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class ReservaService {
@@ -56,6 +58,8 @@ public class ReservaService {
                 .actividad(req.actividad())
                 .estado(estado)
                 .build());
+        log.info("Reserva {} creada por {}: espacio {} ({}), {} a {}, {}",
+                r.getId(), usuario, r.getEspacioId(), r.getEspacioNombre(), r.getInicio(), r.getFin(), estado);
         return aDto(r);
     }
 
@@ -68,6 +72,7 @@ public class ReservaService {
             throw new ReglaNegocioException("La reserva ya empezó");
         }
         cambiarEstado(r, EstadoReserva.CONFIRMADA);
+        log.info("Reserva {} aprobada por bedelía", id);
         return aDto(r);
     }
 
@@ -75,6 +80,7 @@ public class ReservaService {
     public ReservaDto rechazar(Long id) {                        // ADMIN
         Reserva r = buscar(id);
         cambiarEstado(r, EstadoReserva.RECHAZADA);
+        log.info("Reserva {} rechazada por bedelía", id);
         return aDto(r);
     }
 
@@ -88,6 +94,7 @@ public class ReservaService {
             throw new ReglaNegocioException("La reserva ya empezó");                     // RN7
         }
         cambiarEstado(r, EstadoReserva.CANCELADA);
+        log.info("Reserva {} cancelada por {}", id, usuario);
         return aDto(r);
     }
 
