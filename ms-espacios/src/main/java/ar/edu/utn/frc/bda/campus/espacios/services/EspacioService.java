@@ -23,8 +23,10 @@ import ar.edu.utn.frc.bda.campus.espacios.entities.models.EspacioRequest;
 import ar.edu.utn.frc.bda.campus.espacios.entities.models.ValidacionDto;
 import ar.edu.utn.frc.bda.campus.espacios.repositories.EspacioRepository;
 import ar.edu.utn.frc.bda.campus.espacios.services.validadores.ValidadorEspacioBase;
+import lombok.extern.slf4j.Slf4j;
 
 /** ABM de espacios, validación de una franja (para crear reservas) y búsqueda de compatibles. */
+@Slf4j
 @Service
 public class EspacioService {
 
@@ -91,6 +93,7 @@ public class EspacioService {
                 }
             } catch (ServicioNoDisponibleException ex) {
                 // Sin pronóstico no se puede garantizar una cancha: se omite y se sigue con el resto
+                log.warn("Se omite '{}' de la búsqueda: {}", e.getNombre(), ex.getMessage());
             }
         }
         return resultado;

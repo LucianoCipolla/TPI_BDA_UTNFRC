@@ -13,6 +13,10 @@ spring:
       ddl-auto: update
     open-in-view: false
 
+logging:
+  level:
+    ar.edu.utn.frc.bda.campus: ${LOG_LEVEL:INFO}     # nuestro código; DEBUG para ver más detalle
+
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
