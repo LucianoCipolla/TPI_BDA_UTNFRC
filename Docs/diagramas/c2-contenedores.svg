@@ -1,0 +1,175 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1270" viewBox="0 0 1400 1270" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="flecha" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#666"/>
+    </marker>
+    <style>
+      .t  { fill: #fff; text-anchor: middle; }
+      .n  { font-size: 17px; font-weight: 700; }
+      .tec{ font-size: 12px; font-style: italic; }
+      .d  { font-size: 13.5px; }
+      .rel{ stroke: #707070; stroke-width: 1.3; fill: none; marker-end: url(#flecha); }
+      .rl { font-size: 12px; font-weight: 700; fill: #555; text-anchor: middle; }
+      .rt { font-size: 11.5px; font-style: italic; fill: #555; text-anchor: middle; }
+      .b  { fill: none; stroke: #444; stroke-width: 1.2; stroke-dasharray: 7 5; }
+      .bl { font-size: 16px; font-weight: 700; fill: #444; text-anchor: middle; }
+    </style>
+  </defs>
+
+  <rect width="1400" height="1270" fill="#fff"/>
+  <text x="700" y="30" text-anchor="middle" font-size="15" font-weight="700" fill="#000">CampusReservas — Diagrama de Contenedores (C2)</text>
+
+  <!-- Fronteras -->
+  <rect class="b" x="20" y="290" width="1090" height="915"/>
+  <text class="bl" x="880" y="316">Despliegue Docker Compose — red interna (trusted zone)</text>
+  <rect class="b" x="255" y="335" width="835" height="852"/>
+  <text class="bl" x="672" y="360">CampusReservas</text>
+  <text x="672" y="377" text-anchor="middle" font-size="11.5" font-weight="700" fill="#444">[System]</text>
+
+  <!-- Usuarios -->
+  <rect x="240" y="55" width="220" height="140" rx="3" fill="#08427B"/>
+  <circle cx="350" cy="80" r="12" fill="#fff"/>
+  <path d="M332,108 a18,13 0 0 1 36,0 v4 h-36 z" fill="#fff"/>
+  <text class="t n" x="350" y="136">Usuarios</text>
+  <text class="t d" x="350" y="162">Usuario · Administrador. Usan</text>
+  <text class="t d" x="350" y="180">Postman o Swagger.</text>
+
+  <!-- Keycloak -->
+  <rect x="38" y="405" width="200" height="125" rx="3" fill="#B3B3B3"/>
+  <text class="t n" x="138" y="430">Keycloak 26</text>
+  <text class="t tec" x="138" y="447">[Identity Provider]</text>
+  <text class="t d" x="138" y="476">Realm campus: usuarios y</text>
+  <text class="t d" x="138" y="494">roles USUARIO y ADMIN.</text>
+  <text class="t d" x="138" y="512">Emite JWT (OIDC).</text>
+
+  <!-- API Gateway -->
+  <rect x="560" y="395" width="230" height="175" rx="3" fill="#438DD5"/>
+  <text class="t n" x="675" y="420">API Gateway</text>
+  <text class="t tec" x="675" y="437">[Spring Cloud Gateway 5, Spring</text>
+  <text class="t tec" x="675" y="451">Boot 4.1, Java 25]</text>
+  <text class="t d" x="675" y="480">Único punto de entrada</text>
+  <text class="t d" x="675" y="497">(puerto 8080). Ruteo por</text>
+  <text class="t d" x="675" y="514">path. Security Filter: valida el</text>
+  <text class="t d" x="675" y="531">JWT y el rol por ruta; agrega</text>
+  <text class="t d" x="675" y="548">el header X-Usuario.</text>
+
+  <!-- ms-reservas -->
+  <rect x="290" y="675" width="225" height="205" rx="3" fill="#438DD5"/>
+  <text class="t n" x="402" y="700">ms-reservas</text>
+  <text class="t tec" x="402" y="717">[Spring Boot 4.1, Java 25, Spring</text>
+  <text class="t tec" x="402" y="731">Data JPA]</text>
+  <text class="t d" x="402" y="760">Ciclo de vida de la reserva:</text>
+  <text class="t d" x="402" y="777">crear, aprobar, rechazar,</text>
+  <text class="t d" x="402" y="794">cancelar y listar; buscar</text>
+  <text class="t d" x="402" y="811">espacios disponibles. Cadena</text>
+  <text class="t d" x="402" y="828">de validaciones (Chain of</text>
+  <text class="t d" x="402" y="845">Responsibility) y control de</text>
+  <text class="t d" x="402" y="862">concurrencia con @Version.</text>
+
+  <!-- ms-espacios -->
+  <rect x="845" y="675" width="225" height="220" rx="3" fill="#438DD5"/>
+  <text class="t n" x="957" y="700">ms-espacios</text>
+  <text class="t tec" x="957" y="717">[Spring Boot 4.1, Java 25, Spring</text>
+  <text class="t tec" x="957" y="731">Data JPA]</text>
+  <text class="t d" x="957" y="760">ABM de espacios. Valida una</text>
+  <text class="t d" x="957" y="777">franja con una estrategia por</text>
+  <text class="t d" x="957" y="794">tipo de espacio (Strategy):</text>
+  <text class="t d" x="957" y="811">horario, actividad y</text>
+  <text class="t d" x="957" y="828">equipamiento, más las reglas</text>
+  <text class="t d" x="957" y="845">propias de laboratorio, sala y</text>
+  <text class="t d" x="957" y="862">cancha (lluvia). Lista los</text>
+  <text class="t d" x="957" y="879">espacios compatibles.</text>
+
+  <!-- campus-commons -->
+  <rect x="565" y="1010" width="220" height="110" rx="3" fill="#7A8FA6"/>
+  <text class="t n" x="675" y="1035">campus-commons</text>
+  <text class="t tec" x="675" y="1052">[JAR Maven (instalado en .m2)]</text>
+  <text class="t d" x="675" y="1081">ApiResponse, excepciones y</text>
+  <text class="t d" x="675" y="1098">manejo de errores común.</text>
+
+  <!-- reservas-db (cilindro) -->
+  <path d="M285,1015 a95,14 0 0 1 190,0 v138 a95,14 0 0 1 -190,0 z" fill="#438DD5"/>
+  <path d="M285,1015 a95,14 0 0 0 190,0" fill="none" stroke="#fff" stroke-width="1.2" opacity="0.8"/>
+  <text class="t n" x="380" y="1050">reservas-db</text>
+  <text class="t tec" x="380" y="1067">[H2 embebida (archivo)]</text>
+  <text class="t d" x="380" y="1094">Reservas y agenda por</text>
+  <text class="t d" x="380" y="1111">espacio (versión para</text>
+  <text class="t d" x="380" y="1128">concurrencia). Solo la usa</text>
+  <text class="t d" x="380" y="1145">ms-reservas.</text>
+
+  <!-- espacios-db (cilindro) -->
+  <path d="M870,1025 a95,14 0 0 1 190,0 v105 a95,14 0 0 1 -190,0 z" fill="#438DD5"/>
+  <path d="M870,1025 a95,14 0 0 0 190,0" fill="none" stroke="#fff" stroke-width="1.2" opacity="0.8"/>
+  <text class="t n" x="965" y="1062">espacios-db</text>
+  <text class="t tec" x="965" y="1079">[H2 embebida (archivo)]</text>
+  <text class="t d" x="965" y="1106">Tabla de espacios. Solo la</text>
+  <text class="t d" x="965" y="1123">usa ms-espacios.</text>
+
+  <!-- Open-Meteo -->
+  <rect x="1140" y="1010" width="225" height="100" rx="3" fill="#999999"/>
+  <text class="t n" x="1252" y="1037">Open-Meteo</text>
+  <text class="t d" x="1252" y="1068">Pronóstico horario de lluvia</text>
+  <text class="t d" x="1252" y="1086">por coordenadas.</text>
+
+  <!-- Relaciones -->
+  <!-- Usuarios → Keycloak -->
+  <path class="rel" d="M285,195 C200,260 150,330 140,403"/>
+  <text class="rl" x="345" y="232">Inicia sesión y obtiene el</text>
+  <text class="rl" x="345" y="247">token</text>
+  <text class="rt" x="345" y="262">[OIDC]</text>
+  <!-- Usuarios → Gateway -->
+  <path class="rel" d="M410,195 L640,393"/>
+  <text class="rl" x="560" y="232">Invoca /api/**</text>
+  <text class="rt" x="560" y="247">[HTTPS/JSON + Bearer</text>
+  <text class="rt" x="560" y="261">JWT]</text>
+  <!-- Gateway → Keycloak -->
+  <path class="rel" d="M560,470 L240,470"/>
+  <text class="rl" x="400" y="433">Obtiene las claves</text>
+  <text class="rl" x="400" y="448">públicas (JWKS)</text>
+  <text class="rt" x="400" y="462">[HTTP]</text>
+  <!-- Gateway → ms-reservas -->
+  <path class="rel" d="M610,570 L440,673"/>
+  <text class="rl" x="455" y="606">Rutea /api/reservas/**</text>
+  <text class="rt" x="455" y="621">[HTTP/JSON + X-Usuario]</text>
+  <!-- Gateway → ms-espacios -->
+  <path class="rel" d="M745,570 L915,673"/>
+  <text class="rl" x="905" y="606">Rutea /api/espacios/**</text>
+  <text class="rt" x="905" y="621">[HTTP/JSON]</text>
+  <!-- ms-reservas → ms-espacios -->
+  <path class="rel" d="M515,775 L843,775"/>
+  <text class="rl" x="595" y="740">Valida un espacio y</text>
+  <text class="rl" x="595" y="754">pide los compatibles</text>
+  <text class="rt" x="595" y="768">[HTTP/JSON, RestClient]</text>
+  <!-- Gateway → campus-commons (nueva) -->
+  <path class="rel" d="M690,570 L690,1008"/>
+  <text class="rl" x="760" y="935">Dependencia Maven</text>
+  <text class="rt" x="760" y="950">(solo ApiResponse)</text>
+  <!-- ms-reservas → campus-commons -->
+  <path class="rel" d="M470,880 C520,940 570,975 610,1008"/>
+  <text class="rl" x="595" y="915">Dependencia Maven</text>
+  <!-- ms-espacios → campus-commons -->
+  <path class="rel" d="M880,895 C840,950 800,985 760,1008"/>
+  <!-- ms-reservas → reservas-db -->
+  <path class="rel" d="M330,880 C310,930 315,970 330,1000"/>
+  <text class="rl" x="388" y="935">Lee y escribe</text>
+  <text class="rt" x="388" y="950">[JPA]</text>
+  <!-- ms-espacios → espacios-db -->
+  <path class="rel" d="M960,895 L963,1010"/>
+  <text class="rl" x="1010" y="945">Lee y escribe</text>
+  <text class="rt" x="1010" y="960">[JPA]</text>
+  <!-- ms-espacios → Open-Meteo -->
+  <path class="rel" d="M1070,870 L1220,1008"/>
+  <text class="rl" x="1225" y="905">Pronóstico de lluvia</text>
+  <text class="rl" x="1225" y="920">(canchas)</text>
+  <text class="rt" x="1225" y="935">[HTTPS/JSON]</text>
+
+  <!-- Leyenda -->
+  <text x="1140" y="1178" font-size="13" font-weight="700" fill="#000">Legend</text>
+  <g font-size="12.5" fill="#fff">
+    <rect x="1140" y="1184" width="225" height="16" fill="#08427B"/><text x="1160" y="1196">person</text>
+    <rect x="1140" y="1200" width="225" height="16" fill="#438DD5"/><text x="1160" y="1212">container</text>
+    <rect x="1140" y="1216" width="225" height="16" fill="#999999"/><text x="1160" y="1228">external_system</text>
+    <rect x="1140" y="1232" width="225" height="16" fill="#B3B3B3"/><text x="1160" y="1244">external_container</text>
+    <rect x="1140" y="1248" width="225" height="16" fill="#7A8FA6"/><text x="1160" y="1260">librería Java (no se despliega)</text>
+  </g>
+</svg>

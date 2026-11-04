@@ -306,6 +306,9 @@ Ideas clave por si repreguntan:
 - **Controller sin `try/catch` ni lógica:** solo traduce HTTP ↔ service. Si mañana la API fuera por otro medio, el service no cambiaría.
 - **Swagger UI** (`/swagger-ui.html`): springdoc lee los controllers (rutas, parámetros, records y anotaciones) y genera la especificación OpenAPI en `/v3/api-docs`. Swagger UI la muestra como página para probar la API.
 - **`@Tag`** agrupa los endpoints en Swagger; **`@Operation`** describe cada uno. En la descripción pusimos los códigos de error posibles.
+- **`@ResponseStatus(HttpStatus.CREATED)` en el POST:** springdoc arma la documentación leyendo el código, sin ejecutarlo. Ve que el método devuelve un `ResponseEntity`, pero no con qué código: eso se decide recién al correr `ResponseEntity.status(...)`. Sin la anotación, Swagger mostraba 200 para un endpoint que responde 201 (T74).
+- **`@OpenAPIDefinition(info = @Info(...))`** en `MsEspaciosApplication`: el título, la versión y la descripción que Swagger muestra arriba de todo. Sin esto dice "OpenAPI definition v0".
+- **Swagger se ve en modo local:** en Docker los microservicios no publican puertos (trusted zone), así que su Swagger no es accesible desde afuera. Para mostrarlo se levanta el servicio desde el IDE (sección 6 de la guía).
 - **Errores 400 de formato:** un parámetro que falta, un valor que no se puede convertir (`actividad=NADAR`, `id=abc`, una fecha mal escrita) o un JSON roto también salen con `ApiResponse` y un mensaje claro, gracias a tres handlers más en el JAR común (T37).
 
 **`DatosIniciales`**
@@ -636,6 +639,12 @@ Ideas clave por si repreguntan:
 
 - **Por qué importa:** el 500 que daba el gateway decía algo falso. Le avisaba al cliente "está roto, no reintentes", cuando en realidad era "el servicio no está, esperá y reintentá" (ver 500 vs. 503 en las excepciones).
 - **Cómo lo encontramos:** con todo en Docker apagamos ms-espacios (`docker compose stop ms-espacios`) y pedimos `GET /api/espacios` por el gateway: daba **500**. Crear y buscar reservas ya daban 503, porque esos pedidos pasan por ms-reservas, que traduce el error en su `EspaciosClient`. Pero listar espacios va directo del gateway a ms-espacios, y ahí nadie lo traducía.
+- **¿Por qué no alcanza con el `GlobalExceptionHandler`?** Porque está **adentro** de cada microservicio, y solo atrapa las excepciones que salen del código de ese microservicio mientras atiende un pedido: el `throw` sube (por eso son `RuntimeException`, sin `try/catch` en cada capa) hasta el controller, y el handler lo traduce. Si el contenedor de ms-espacios está apagado, no hay ningún ms-espacios corriendo, ni código, ni handler: el error pasa en **otra aplicación**, el gateway, cuando intenta conectarse y no puede. Es como un recepcionista que atiende los reclamos adentro de una oficina: si la oficina está cerrada, el que tiene que avisar "está cerrado, volvé más tarde" es el de la puerta.
+- **¿Y el resto de los errores, el gateway no los maneja?** No hace falta, porque el gateway no tiene lógica propia. Los errores posibles son tres:
+  - **Los del microservicio** (404, 409, 422, 503 de Open-Meteo...): los arma el `GlobalExceptionHandler` de cada servicio, y el gateway reenvía la respuesta tal cual, con su código y su `ApiResponse`.
+  - **Los de seguridad** (401 y 403, incluida una ruta que no existe): los decide Spring Security antes de rutear. Salen sin cuerpo: el gateway corta el pedido antes de que llegue a nuestro código.
+  - **Que el microservicio no responda:** el único error que nace en el gateway y que nadie más puede responder. Es este filtro.
+- **Por qué el handler del JAR común no se puede usar en el gateway:** es de Spring MVC (`@RestControllerAdvice` sobre servlets) y el gateway es reactivo (WebFlux, sobre Netty), así que aunque se escaneara no se aplicaría. Además, el error de conexión no sale de un controller, sino del filtro que reenvía el pedido.
 - **`implements GlobalFilter, Ordered` y `getOrder()`:** `Ordered` le dice al gateway en qué lugar de la cadena va el filtro. `HIGHEST_PRECEDENCE` lo pone **primero**, para que envuelva a todos los demás, incluido el que reenvía el pedido al microservicio: cualquier error que salga de la cadena pasa por acá.
 - **El logger a mano:** `private static final Logger log = LoggerFactory.getLogger(ServicioCaidoFilter.class);` es exactamente lo que genera `@Slf4j` en los microservicios. Acá se escribe a mano porque el gateway no usa Lombok (T61), igual que en el JAR común. Por eso hacen falta los dos imports: `org.slf4j.Logger` (el tipo) y `org.slf4j.LoggerFactory` (el que lo crea).
 - **`chain.filter(exchange).onErrorResume(condición, reemplazo)`:** es el `try/catch` del mundo reactivo. Deja seguir el pedido normalmente y, **solo si** termina con un error que cumple la condición, lo reemplaza por nuestra respuesta 503. Cualquier otro error sigue su camino.
@@ -696,6 +705,20 @@ Ideas clave por si repreguntan:
 - **`TZ: America/Argentina/Cordoba`:** ver T68.
 - **Las bases H2 viven dentro de cada contenedor** (`/app/data`): sobreviven a `docker compose stop` y `start`, pero se pierden con `docker compose down`, que borra los contenedores. Ver T69.
 - **`--build`:** obliga a rearmar las imágenes. Hace falta cada vez que se corre `build.sh` de nuevo, porque si no, Docker usa la imagen vieja con el JAR anterior.
+
+**Colección de Postman (`Docs/CampusReservas.postman_collection.json` y `Docs/CampusReservas.postman_environment.json`)**
+
+> "Es la forma de probar la API sin frontend (D24). Tiene 62 pedidos en nueve carpetas, en el mismo orden que la guía: login, catálogo, validación, búsqueda, reservas, una por cada regla de negocio, estados, seguridad del gateway y resiliencia. Todos entran por el gateway con el JWT de Keycloak. La carpeta 0 tiene un login por usuario que guarda el token en el environment (`token_usuario1`, `token_usuario2`, `token_admin1`), y cada pedido usa el token del usuario que corresponde. Cada pedido tiene un test con el código HTTP esperado, así que con el Runner de Postman se corre la colección entera y se ve en verde que todo responde lo que tiene que responder."
+
+Ideas clave por si repreguntan:
+
+- **Collection y environment:** la colección tiene los pedidos; el environment, las variables que cambian según dónde corre: `gateway` (`http://localhost:8080`), `keycloak` (`http://localhost:8180`), los tokens y los ids que se van creando. Para probar contra otra máquina alcanza con cambiar el environment.
+- **El login guarda el token:** en la pestaña *Tests* del login, `pm.environment.set("token_usuario1", pm.response.json().access_token)`. Es lo que pedía el plan (sección 7.4).
+- **El token se renueva solo (T71):** un script de la colección, que corre antes de cada pedido, pide un token nuevo con `pm.sendRequest` cuando el guardado venció. Duran 5 minutos y la demo dura más.
+- **Las fechas se calculan solas:** el mismo script arma `{{dia}}` (el próximo día hábil a 2 o más días), `{{sabado}}`, `{{lejos}}` (a 20 días, para RN1) y `{{manana_inicio}}`, que es mañana a la misma hora: siempre menos de 24 h, para RN10. Así la colección sirve cualquier día, sin editar fechas.
+- **Los ids se guardan, no se adivinan (T72):** cada pedido que crea algo guarda el id que devolvió (`reserva_clase`, `reserva_evento`...), y los siguientes lo usan. Al final se cancelan las reservas que quedaron activas, así la colección se puede correr varias veces sin borrar la base.
+- **Lo que no está en Postman:** la concurrencia (RN15). Postman manda los pedidos de a uno; para que dos lleguen a la vez usamos `curl` con `&` (sección 3.6 de la guía). La carpeta 8, resiliencia, necesita apagar ms-espacios antes, así que no se corre junto con el resto.
+- **Probada:** contra Docker corrimos las carpetas 0 a 7 tres veces seguidas sobre la misma base (67 tests, 0 fallas cada vez) y la carpeta 8 con ms-espacios apagado (4 de 4).
 
 ---
 
@@ -1134,6 +1157,33 @@ Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las
 - **Por qué:** al probar la guía en Docker, con ms-espacios apagado, `GET /api/espacios` tardaba **30 segundos** en dar el 503. El gateway todavía tenía guardada la IP del contenedor, y conectarse a una IP donde ya no hay nadie no falla enseguida: espera hasta el timeout de Netty, que por defecto es de 30 s. Crear y buscar reservas daban 503 al instante porque el `RestClient` de ms-reservas ya tenía 2 s para conectar y 3 para leer (`RestClientConfig`). Con el mismo valor en el gateway, los dos caminos se comportan igual.
 - **Probado:** con la IP guardada, 503 en 2,0 s (el log dice `connection timed out after 2000 ms`); con el gateway recién levantado, el nombre `ms-espacios` ya no resuelve y da 503 por `Failed to resolve`.
 - **Descartamos:** un `response-timeout` (cuánto esperar la respuesta, una vez conectado). Ningún pedido nuestro tarda tanto: el más lento es la búsqueda de disponibles, y ese ya tiene sus propios timeouts para ms-espacios y Open-Meteo.
+
+### Swagger
+
+**T74. Swagger muestra el 201 de los POST y los códigos completos de cada endpoint**
+- **Decisión:** `@ResponseStatus(HttpStatus.CREATED)` en los dos POST de creación, las descripciones de `validacion`, `compatibles` y `disponibilidad` completadas con sus códigos, y un `@OpenAPIDefinition` con el título en cada clase `...Application`.
+- **Por qué:** al revisar la especificación que genera cada servicio (`/v3/api-docs`) contra lo implementado, encontramos tres diferencias. Los POST figuraban con 200 aunque responden 201. A tres descripciones les faltaban códigos: el 422 de una franja mal armada (`validarFranja` y `ReglasFranja`) y el 503 de la búsqueda. Y el título era el genérico "OpenAPI definition v0".
+- **Probado:** después del cambio, `/v3/api-docs` muestra 201 en los POST y los títulos `ms-espacios 1.0` y `ms-reservas 1.0`; el POST sigue respondiendo 201 y la colección de Postman pasa entera (67 de 67).
+- **Descartamos:** una anotación `@ApiResponse` de Swagger por cada código, que los mostraría en la tabla *Responses*. Se llama igual que nuestro `ApiResponse` de `campus-commons`, así que habría que escribir `@io.swagger.v3.oas.annotations.responses.ApiResponse(...)` completo unas 35 veces. Los códigos ya están en la descripción de cada endpoint.
+
+### Diagramas
+
+**T73. El C2 se actualizó con la dependencia del gateway a `campus-commons`**
+- **Decisión:** al revisar C1 y C2 contra lo desplegado, el C1 coincidía entero y el C2 en todo salvo un detalle: el gateway también depende de `campus-commons`, solo por `ApiResponse`, desde que el 503 de `ServicioCaidoFilter` usa el mismo formato que el resto de la API (T61). Agregamos esa flecha ("Dependencia Maven, solo ApiResponse") y corregimos dos textos de la Entrega: en 5.2, los timeouts (2 s para conectar y 3 s para responder, y el 503 del gateway al consultar espacios) y en 5.6, que el gateway también usa el JAR.
+- **Por qué:** el enunciado exige que los diagramas coincidan con lo desplegado. Es una dependencia de compilación, no una comunicación entre contenedores: el JAR no se despliega, igual que para los microservicios.
+- **Cómo:** el `.puml` original no estaba en el repo, así que el C2 quedó redibujado en `Docs/diagramas/c2-contenedores.svg` (con el mismo estilo C4) y exportado a `c2-contenedores.png`, que es la imagen de la Entrega. Para cambiarlo de nuevo se edita el SVG.
+
+### Postman
+
+**T71. La colección renueva sola los tokens vencidos**
+- **Decisión:** además del login por usuario que pide el plan, un script de la colección (*Pre-request*) pide un token nuevo con `pm.sendRequest` cuando el guardado venció, y lo guarda en el mismo `token_usuarioX`.
+- **Por qué:** los tokens de Keycloak duran 5 minutos. Sin esto, a mitad de la demo todos los pedidos empezarían a dar 401 y habría que volver a la carpeta de login cada tanto. Los logins siguen estando, para mostrar cómo se pide el token.
+- **Descartamos:** alargar la duración del token en el realm. Es más simple, pero cambia la configuración de seguridad solo para que la demo sea cómoda.
+
+**T72. Cada pedido guarda el id que crea, y al final se cancela lo que quedó activo**
+- **Decisión:** los pedidos que crean algo guardan el id en el environment (`espacio_nuevo`, `reserva_clase`, `reserva_evento`...), y los que vienen después lo usan en la URL. Si no se creó, el id queda en 0, así el pedido siguiente da 404 y no toca una reserva de una corrida anterior. Al final de las carpetas 6 y 7 se cancelan las reservas que quedaron activas.
+- **Por qué:** en la guía los ids están escritos (reservas 1 a 4) y solo coinciden con la base vacía. La colección se puede correr varias veces seguidas sobre la misma base: lo probamos tres veces y pasó entera cada vez.
+- **Descartamos:** borrar las reservas al final. No hay endpoint para borrar reservas (y no corresponde: una reserva cancelada queda como historial), así que cancelar es lo que corresponde.
 
 ### Logs
 
