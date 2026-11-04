@@ -2,12 +2,11 @@
 
 Paso a paso para compilar, levantar Keycloak y los microservicios, y recorrer todas las reglas de negocio con comandos listos para copiar. Sirve como guion para la presentación.
 
-> **Estado actual (Fase 2):** están `campus-commons`, `ms-espacios`, `ms-reservas` y Keycloak. El **API Gateway todavía no existe**, así que en esta guía:
-> - le pegamos **directo** a cada microservicio (8081 y 8082);
-> - el usuario se manda a mano en el header `X-Usuario`, que es lo que después va a poner el gateway a partir del JWT;
-> - las rutas de ADMIN no están protegidas todavía (de eso se va a encargar el gateway).
+> **Estado actual (Fase 3):** están `campus-commons`, `ms-espacios`, `ms-reservas`, el **API Gateway** y Keycloak. Todavía no está Docker Compose para los servicios (Fase 4), así que cada uno se levanta en su terminal y **los microservicios también se pueden llamar directo** (8081 y 8082). En esta guía:
+> - las secciones 6.2 a 6.9 le pegan **directo** a cada microservicio, con el usuario a mano en el header `X-Usuario`: es la forma más rápida de mostrar las reglas de negocio;
+> - la sección 6.10 entra **por el gateway** (8080) con un JWT de Keycloak: muestra los 401 y 403, y que el `X-Usuario` lo pone el gateway a partir del token.
 >
-> Keycloak ya funciona: mostramos el login y el JWT que emite, que es lo que el gateway va a validar.
+> En la Fase 4 los microservicios dejan de publicar puertos y todo pasa a entrar por el gateway.
 
 ---
 
@@ -29,7 +28,7 @@ Puertos que usa el sistema:
 | 8180 | Keycloak |
 | 8081 | ms-espacios |
 | 8082 | ms-reservas |
-| 8080 | API Gateway (Fase 3, todavía no existe) |
+| 8080 | API Gateway |
 
 ---
 
@@ -53,7 +52,13 @@ cd ms-espacios && ./mvnw clean verify && cd ..
 cd ms-reservas && ./mvnw clean verify && cd ..
 ```
 
-Los dos tienen que terminar con `BUILD SUCCESS`. Los avisos de Mockito (*"A Java agent has been loaded dynamically"*) y de SpringDoc son normales.
+**2.3. Compilar el gateway**
+
+```bash
+cd api-gateway && ./mvnw clean verify && cd ..
+```
+
+Los tres tienen que terminar con `BUILD SUCCESS`. Los avisos de Mockito (*"A Java agent has been loaded dynamically"*) y de SpringDoc son normales.
 
 > Si cambiás algo en `campus-commons`, volvé a correr el paso 2.1 antes de compilar los microservicios.
 
@@ -103,7 +108,15 @@ cd ms-espacios && ./mvnw spring-boot:run
 cd ms-reservas && ./mvnw spring-boot:run
 ```
 
-Están listos cuando en el log aparece `Started MsEspaciosApplication` / `Started MsReservasApplication`.
+**Terminal 3: api-gateway (puerto 8080)**
+
+```bash
+cd api-gateway && ./mvnw spring-boot:run
+```
+
+Están listos cuando en el log aparece `Started MsEspaciosApplication` / `Started MsReservasApplication` / `Started ApiGatewayApplication` (el gateway además muestra `Netty started on port 8080`: es reactivo y corre sobre Netty, no sobre Tomcat).
+
+> El gateway no necesita que Keycloak esté arriba para arrancar: baja las claves públicas recién cuando llega el primer pedido con token.
 
 Al arrancar por primera vez, ms-espacios carga 5 espacios de prueba (`DatosIniciales`):
 
@@ -124,14 +137,17 @@ Al arrancar por primera vez, ms-espacios carga 5 espacios de prueba (`DatosInici
 
 ## 5. Preparar la terminal de pruebas
 
-Abrí una **tercera terminal** de Git Bash y pegá este bloque entero. Define las URLs, una función para ver el código HTTP de cada respuesta y las fechas de prueba.
+Abrí una **cuarta terminal** de Git Bash y pegá este bloque entero. Define las URLs, una función para ver el código HTTP de cada respuesta, otra para pedir tokens a Keycloak y las fechas de prueba.
 
 ```bash
 ESP=http://localhost:8081
 RES=http://localhost:8082
+GW=http://localhost:8080
 KC=http://localhost:8180
 JSON='Content-Type: application/json'
 pedir() { curl -s -w "\n→ HTTP %{http_code}\n\n" "$@"; }
+# token usuario1 → imprime el access_token de ese usuario (la contraseña es igual al usuario)
+token() { curl -s -X POST "$KC/realms/campus/protocol/openid-connect/token" -d grant_type=password -d client_id=campus-api -d "username=$1" -d "password=$1" | sed -E 's/.*"access_token":"([^"]+)".*/\1/'; }
 
 # DIA: el próximo día hábil a 2 o más días de hoy (sirve para el laboratorio, que pide lunes a viernes y 24 h de anticipación)
 DIA=$(date -d "+2 days" +%F); while [ "$(date -d "$DIA" +%u)" -gt 5 ]; do DIA=$(date -d "$DIA +1 day" +%F); done
@@ -175,8 +191,8 @@ echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null; echo
 Qué señalar en la salida:
 
 - `iss`: `http://localhost:8180/realms/campus` → quién lo emitió.
-- `preferred_username`: `usuario1` → lo que el gateway va a poner en `X-Usuario`.
-- `realm_access.roles`: `["USUARIO"]` → lo que el gateway va a usar para autorizar.
+- `preferred_username`: `usuario1` → lo que el gateway pone en `X-Usuario`.
+- `realm_access.roles`: `["USUARIO"]` → lo que el gateway usa para autorizar.
 - `exp` − `iat` = 300 → **el token dura 5 minutos**.
 
 También se puede pegar el token en <https://jwt.io> para verlo decodificado.
@@ -452,7 +468,7 @@ pedir -X POST $RES/api/reservas -H "X-Usuario: usuario1" -H "$JSON" -d "{
 }"
 ```
 
-**Sin header `X-Usuario`** → `400` (cuando esté el gateway, sin token va a ser `401`)
+**Sin header `X-Usuario`** → `400` (llamando directo a ms-reservas; por el gateway, sin token es `401`: ver 6.10)
 
 ```bash
 pedir -X POST $RES/api/reservas -H "$JSON" -d '{}'
@@ -567,6 +583,132 @@ pedir $RES/api/reservas/mias -H "X-Usuario: usuario1"
 
 Después volvé a levantar ms-espacios (`./mvnw spring-boot:run` en la Terminal 1).
 
+### 6.10. Seguridad: todo por el gateway
+
+Ahora el cliente le habla **solo al gateway** (`$GW`, puerto 8080) y manda el JWT en `Authorization: Bearer`. Ya no hay `X-Usuario` a mano: lo pone el gateway a partir del token. Es la tabla 7.4 del plan.
+
+**Pedir los tokens de los tres usuarios** (duran 5 minutos: si algo empieza a dar `401`, volvé a correr esta línea)
+
+```bash
+U1=$(token usuario1); U2=$(token usuario2); AD=$(token admin1); echo "tokens listos"
+```
+
+**Sin token** → `401` (no sé quién sos)
+
+```bash
+pedir $GW/api/espacios
+```
+
+**Listar espacios con usuario1** → `200` (GET de espacios: USUARIO o ADMIN)
+
+```bash
+pedir $GW/api/espacios -H "Authorization: Bearer $U1"
+```
+
+**Token modificado a mano** → `401` (cambiamos las últimas letras: la firma ya no coincide)
+
+```bash
+pedir $GW/api/espacios -H "Authorization: Bearer ${U1%?????}xxxxx"
+```
+
+**usuario1 intenta crear un espacio** → `403` (sé quién sos, pero tu rol no alcanza: solo ADMIN)
+
+```bash
+pedir -X POST $GW/api/espacios -H "Authorization: Bearer $U1" -H "$JSON" -d '{
+  "nombre": "Aula Gateway", "tipo": "AULA", "capacidad": 30, "latitud": -31.44, "longitud": -64.19,
+  "horaApertura": "08:00", "horaCierre": "22:00", "actividadesPermitidas": ["CLASE"]
+}'
+```
+
+**admin1 lo crea** → `201`
+
+```bash
+pedir -X POST $GW/api/espacios -H "Authorization: Bearer $AD" -H "$JSON" -d '{
+  "nombre": "Aula Gateway", "tipo": "AULA", "capacidad": 30, "latitud": -31.44, "longitud": -64.19,
+  "horaApertura": "08:00", "horaCierre": "22:00", "actividadesPermitidas": ["CLASE"]
+}'
+```
+
+**Buscar disponibles con usuario1** → `200`
+
+```bash
+pedir "$GW/api/reservas/disponibilidad?inicio=${DIA}T08:00:00&fin=${DIA}T09:00:00&asistentes=20&actividad=CLASE" -H "Authorization: Bearer $U1"
+```
+
+**usuario1 reserva, y además manda un `X-Usuario: usuario2` falso** → `201`, y en la respuesta dice `"usuario":"usuario1"`: el gateway borró el header del cliente y puso el del token
+
+```bash
+pedir -X POST $GW/api/reservas -H "Authorization: Bearer $U1" -H "X-Usuario: usuario2" -H "$JSON" -d "{
+  \"espacioId\": 2, \"inicio\": \"${DIA}T08:00:00\", \"fin\": \"${DIA}T09:00:00\",
+  \"asistentes\": 20, \"actividad\": \"CLASE\"
+}"
+```
+
+**Mis reservas con usuario1** → `200`, sin mandar `X-Usuario`
+
+```bash
+pedir $GW/api/reservas/mias -H "Authorization: Bearer $U1"
+```
+
+**Todas las reservas: usuario1** → `403`; **admin1** → `200`
+
+```bash
+pedir $GW/api/reservas -H "Authorization: Bearer $U1"
+```
+
+```bash
+pedir $GW/api/reservas -H "Authorization: Bearer $AD"
+```
+
+**admin1 intenta reservar** → `403` (crear reservas es solo para USUARIO)
+
+```bash
+pedir -X POST $GW/api/reservas -H "Authorization: Bearer $AD" -H "$JSON" -d '{}'
+```
+
+**Aprobar un evento por el gateway.** usuario1 crea un evento (queda `PENDIENTE`) y guardamos su id en `EV`:
+
+```bash
+EV=$(curl -s -X POST $GW/api/reservas -H "Authorization: Bearer $U1" -H "$JSON" -d "{
+  \"espacioId\": 2, \"inicio\": \"${DIA}T19:00:00\", \"fin\": \"${DIA}T21:00:00\",
+  \"asistentes\": 40, \"actividad\": \"EVENTO\"
+}" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2); echo "evento id=$EV"
+```
+
+**usuario1 intenta aprobarlo** → `403` (aprobar es solo ADMIN)
+
+```bash
+pedir -X PATCH $GW/api/reservas/$EV/aprobar -H "Authorization: Bearer $U1"
+```
+
+**admin1 ve los pendientes y lo aprueba** → `200` y `200`, pasa a `CONFIRMADA`
+
+```bash
+pedir "$GW/api/reservas?estado=PENDIENTE" -H "Authorization: Bearer $AD"
+```
+
+```bash
+pedir -X PATCH $GW/api/reservas/$EV/aprobar -H "Authorization: Bearer $AD"
+```
+
+**usuario2 intenta cancelar el evento de usuario1** → `403`, pero **este 403 lo da ms-reservas** (RN7), no el gateway: usuario2 tiene el rol USUARIO y la ruta está permitida. El gateway le pasó `X-Usuario: usuario2` y ms-reservas vio que la reserva no es suya.
+
+```bash
+pedir -X PATCH $GW/api/reservas/$EV/cancelar -H "Authorization: Bearer $U2"
+```
+
+**Una ruta que no existe, con token válido** → `403` (la corta `denyAll()`: nunca llega a ningún servicio)
+
+```bash
+pedir $GW/api/otra -H "Authorization: Bearer $U1"
+```
+
+Qué señalar en la presentación:
+
+- **401 vs. 403:** sin token o con un token inválido, 401; con un token válido pero sin el rol, 403. Los dos los decide el gateway, antes de rutear, y salen sin cuerpo.
+- **El 403 de RN7 es distinto:** ese sí tiene el `ApiResponse` con el mensaje, porque lo da ms-reservas.
+- **Token vencido:** si esperás más de 5 minutos y repetís cualquier pedido con el mismo token, da `401`.
+
 ---
 
 ## 7. Resumen de códigos HTTP
@@ -576,8 +718,8 @@ Después volvé a levantar ms-espacios (`./mvnw spring-boot:run` en la Terminal 
 | 200 | Consulta o cambio de estado correcto | Aprobar, cancelar, listar |
 | 201 | Se creó algo | Crear espacio o reserva |
 | 400 | El pedido está mal formado | JSON inválido, falta `X-Usuario` |
-| 401 | Credenciales inválidas | Token con contraseña incorrecta |
-| 403 | El recurso no es tuyo | Cancelar una reserva ajena |
+| 401 | No sé quién sos | Contraseña incorrecta en Keycloak; por el gateway, sin token o con un token modificado o vencido |
+| 403 | Sé quién sos, pero no podés | Por el gateway, usuario1 crea un espacio (rol); en ms-reservas, cancelar una reserva ajena (RN7) |
 | 404 | No existe | Espacio 99 |
 | 409 | Choca con el estado actual | Superposición, aprobar dos veces |
 | 422 | Viola una regla de negocio | Capacidad, horario, sala por 3 h |
@@ -587,7 +729,7 @@ Después volvé a levantar ms-espacios (`./mvnw spring-boot:run` en la Terminal 
 
 ## 8. Apagar todo
 
-- Microservicios: **Ctrl+C** en cada terminal.
+- Microservicios y gateway: **Ctrl+C** en cada terminal.
 - Keycloak:
 
 ```bash

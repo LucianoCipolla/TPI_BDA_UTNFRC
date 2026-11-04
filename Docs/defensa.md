@@ -516,6 +516,114 @@ Ideas clave por si repreguntan:
 
 ---
 
+## Fase 3: api-gateway
+
+**Qué es el gateway y por qué existe**
+
+> "Es la única puerta de entrada al backend (D5). El cliente le habla solo al gateway, en el puerto 8080, y el gateway decide a qué microservicio va cada pedido según el path: `/api/espacios/**` a ms-espacios y `/api/reservas/**` a ms-reservas. Además concentra la seguridad (D6): valida el JWT de Keycloak (si no es válido, 401) y controla que el rol pueda usar esa ruta (si no, 403). Los microservicios no publican puertos, así que solo reciben pedidos que ya pasaron por este control. Es lo que vimos en el apunte 19."
+
+**¿Por qué el gateway tiene tan poco código?**
+
+> "Porque casi todo el trabajo lo hacen Spring Cloud Gateway y Spring Security; nosotros solo declaramos qué queremos. Con tres clases decimos las dos rutas, las reglas por rol y cómo leer los roles de Keycloak, y agregamos el header del usuario. Lo que no escribimos, pero pasa en cada pedido, es mucho: leer el header `Authorization`, bajar y guardar las claves públicas de Keycloak, verificar la firma RSA del JWT, controlar el emisor y el vencimiento, responder 401 o 403, buscar la ruta que coincide, abrir la conexión con el microservicio, reenviar el pedido con sus headers y su cuerpo, y devolver la respuesta. Que sea poco código es la idea: la seguridad queda en un lugar chico, fácil de leer y de revisar, y no repetida en cada servicio (D6)."
+
+**Cómo se creó el proyecto y qué tiene el `pom.xml`**
+
+> "Lo generamos con Spring Initializr igual que los microservicios: Maven, Java 25, Spring Boot 4.1.2 y el paquete `ar.edu.utn.frc.bda.campus.gateway`. Tiene solo dos dependencias: **Reactive Gateway**, que hace el ruteo, y **OAuth2 Resource Server**, que valida el JWT. Como el gateway es parte de Spring Cloud y no de Spring Boot, el `pom.xml` además importa la BOM de Spring Cloud (`spring-cloud-dependencies` 2025.1.4), que fija las versiones de todo lo de Spring Cloud compatibles con Boot 4.1. No tiene base de datos, ni controllers, ni Lombok, ni el JAR común: no guarda nada y no tiene lógica de negocio, solo rutea y controla el acceso."
+
+Las dependencias, una por una:
+
+| Dependencia | Para qué la usamos |
+|---|---|
+| `spring-cloud-starter-gateway-server-webflux` | Spring Cloud Gateway en su versión **reactiva** (WebFlux sobre Netty). Trae el `RouteLocator` para declarar las rutas, los filtros (`GlobalFilter`) para modificar pedidos, y el cliente HTTP que reenvía cada pedido al microservicio. |
+| `spring-boot-starter-security-oauth2-resource-server` | Spring Security + soporte de **Resource Server**: lee el header `Authorization: Bearer <jwt>`, baja las claves públicas de Keycloak, verifica la firma, el emisor (`iss`) y el vencimiento (`exp`), y arma el usuario autenticado con sus roles. Es lo que usa nuestro `SecurityWebFilterChain`. |
+| `spring-boot-starter-security-oauth2-resource-server-test` (test) | Utilidades para probar la seguridad sin Keycloak (por ejemplo, simular un JWT con un rol). Solo se usa en los tests. |
+| `reactor-test` (test) | Herramientas para probar código reactivo (`Mono`, `Flux`), como `StepVerifier`. Solo se usa en los tests. |
+| BOM `spring-cloud-dependencies` (en `dependencyManagement`) | No agrega ninguna librería: solo fija las versiones de Spring Cloud. Por eso la dependencia del gateway va **sin** `<version>`. |
+
+Ideas clave por si repreguntan:
+
+- **Resource Server:** en OAuth2, es el servidor que tiene los recursos (la API) y los protege pidiendo un token. El que emite el token es el Authorization Server, que en nuestro caso es Keycloak. El gateway no hace login ni guarda contraseñas: solo verifica tokens que emitió otro.
+- **Por qué reactivo (WebFlux):** un gateway pasa casi todo su tiempo esperando respuestas de otros servicios. El modelo reactivo atiende muchos pedidos con pocos hilos, sin dejar un hilo bloqueado por cada pedido en espera. Por eso el gateway corre sobre **Netty** y no sobre Tomcat, como los microservicios.
+- **Consecuencia del modelo reactivo:** la seguridad se configura con `ServerHttpSecurity` y `SecurityWebFilterChain` (las versiones reactivas), y los filtros devuelven `Mono<Void>` en vez de ejecutarse en un hilo propio.
+- **Dos BOMs:** el parent `spring-boot-starter-parent` fija las versiones de Spring Boot; la BOM `spring-cloud-dependencies` fija las de Spring Cloud. Cada versión de Spring Cloud es compatible con una línea de Boot: la 2025.1.x va con Boot 4.0 y 4.1 (la 2026.0 será para Boot 4.2).
+- **`<spring-cloud.version>` en `properties`:** Initializr deja la versión en una propiedad para cambiarla en un solo lugar.
+- **`spring-boot-maven-plugin`:** igual que en los microservicios, arma el JAR ejecutable (`java -jar api-gateway.jar`).
+- **Puerto 8080:** es el único puerto de la aplicación que se publica en Docker, además del de Keycloak (8180).
+
+**`application.yaml`**
+
+> "Es la configuración del gateway, y tiene tres partes. El puerto 8080. La configuración del Resource Server, con dos URLs de Keycloak: `issuer-uri`, el emisor que exigimos que diga el token, y `jwk-set-uri`, de donde bajamos las claves públicas para verificar la firma. Y nuestras propiedades propias con las URLs de los dos microservicios, que usa el `RouteLocator` para saber a dónde reenviar cada pedido. Igual que en los microservicios, lo que cambia entre el IDE y Docker se puede pisar con una variable de entorno."
+
+Ideas clave por si repreguntan:
+
+- **Reemplaza a `application.properties`:** Initializr genera un `.properties`; lo cambiamos por `.yaml`, como en los otros servicios. Son equivalentes (`spring.application.name=api-gateway` es lo mismo que el anidado del YAML), pero el YAML se lee mejor cuando hay muchas propiedades con el mismo prefijo, como las de `spring.security.oauth2...`.
+- **`issuer-uri: http://localhost:8180/realms/campus`:** el gateway rechaza (401) cualquier token cuyo claim `iss` no sea exactamente este. Así no acepta tokens emitidos por otro realm u otro Keycloak, aunque estén bien firmados.
+- **`jwk-set-uri`:** la dirección del JWK Set, el documento público donde Keycloak publica sus claves. Con la clave pública el gateway verifica que la firma la hizo Keycloak con su clave privada, sin preguntarle a Keycloak por cada pedido: baja las claves una vez y las guarda.
+- **Por qué dos URLs y no una (sección 7.3 del plan):** el token que pide Postman dice `iss: http://localhost:8180/...`, porque Postman habló con `localhost:8180`. Pero dentro de Docker el gateway llega a Keycloak como `http://keycloak:8080`. Entonces el emisor queda fijo en `localhost:8180` (lo que dice el token), y solo cambia la dirección desde donde se bajan las claves, con la variable `JWK_SET_URI` en el `docker-compose.yml` (Fase 4).
+- **Si solo pusiéramos `issuer-uri`:** Spring buscaría las claves en `localhost:8180` también desde Docker, donde `localhost` es el propio contenedor del gateway, y no las encontraría.
+- **`campus.ms-espacios-url` y `campus.ms-reservas-url`:** propiedades nuestras (el prefijo `campus` lo inventamos, como en los microservicios, T15). Desde el IDE, cada servicio está en `localhost`; en Docker valen `http://ms-espacios:8081` y `http://ms-reservas:8082`, el nombre de cada servicio en la red interna.
+- **`spring.application.name`:** el nombre de la aplicación; aparece en los logs (`[api-gateway]`). Lo dejamos, como en los microservicios, aunque el bloque original del plan no lo tenía.
+
+**`GatewayConfig`: las rutas**
+
+> "Define las dos rutas del gateway con un `RouteLocator`, como en el apunte 19. Cada ruta tiene un id, un predicado y un destino: si el path del pedido empieza con `/api/espacios/`, se reenvía a ms-espacios; si empieza con `/api/reservas/`, a ms-reservas. El path no cambia: `GET /api/espacios/3` en el gateway llega como `GET /api/espacios/3` al microservicio. Las direcciones de los servicios no están escritas en el código: vienen del `application.yaml`, así que el mismo código sirve en el IDE y en Docker."
+
+Ideas clave por si repreguntan:
+
+- **`@Configuration` + `@Bean`:** la clase es de configuración, y el método `rutas` crea un objeto que Spring guarda y usa. El gateway busca todos los beans `RouteLocator` y arma su tabla de rutas con ellos.
+- **`RouteLocatorBuilder`:** lo inyecta Spring Cloud Gateway; es un constructor de rutas con una API fluida (`routes().route(...).route(...).build()`).
+- **`@Value("${campus.ms-espacios-url}")`:** inyecta el valor de la propiedad como parámetro del método. Si la propiedad no existe, la aplicación no arranca: es mejor fallar al inicio que rutear a cualquier lado.
+- **`r.path("/api/espacios/**")`:** el *predicado*, la condición que tiene que cumplir el pedido. `**` coincide con cualquier cantidad de segmentos, también con ninguno: matchea `/api/espacios`, `/api/espacios/3` y `/api/espacios/3/validacion`.
+- **`.uri(espacios)`:** el destino. Solo se toma el esquema, el host y el puerto (`http://localhost:8081`); el path y los parámetros del pedido original se mantienen.
+- **El id (`"espacios"`, `"reservas"`):** sirve para identificar la ruta en los logs y en las herramientas de diagnóstico.
+- **Qué no hace esta clase:** no decide quién puede entrar. El ruteo y la seguridad están separados: la seguridad la aplica antes el `SecurityWebFilterChain`, y un pedido que no pasa ni siquiera llega a rutearse.
+- **Por qué en Java y no en el YAML:** Spring Cloud Gateway también acepta las rutas en `spring.cloud.gateway.server.webflux.routes`. Elegimos el `RouteLocator` porque es lo que muestra el apunte 19 y el plan, y porque un error de tipeo da error de compilación en vez de una ruta que no anda.
+
+**`SecurityConfig`: el Security Filter**
+
+> "Es la seguridad de todo el sistema, en un solo lugar (D6). Hace dos controles distintos. Primero **autentica**: el pedido tiene que traer un JWT válido, firmado por Keycloak, con nuestro emisor y sin vencer; si no, 401. Después **autoriza**: según el método y el path, el rol del usuario tiene que estar permitido; si no, 403. Las reglas son: ver espacios, cualquiera de los dos roles; crear, modificar o borrar espacios, solo ADMIN; ver todas las reservas y aprobar o rechazar eventos, solo ADMIN; crear, ver las propias, cancelar y buscar disponibles, solo USUARIO; y cualquier otra cosa, denegada. Como Keycloak manda los roles en un claim propio (`realm_access.roles`), escribimos un convertidor que los transforma en el formato que entiende Spring (`ROLE_USUARIO`, `ROLE_ADMIN`)."
+
+Ideas clave por si repreguntan:
+
+- **401 vs. 403:** 401 *Unauthorized* es "no sé quién sos" (falta el token, está vencido, la firma no coincide o el emisor no es el nuestro). 403 *Forbidden* es "sé quién sos, pero no podés hacer esto" (el token es válido y el rol no alcanza).
+- **`@EnableWebFluxSecurity` y `ServerHttpSecurity`:** son las versiones **reactivas** de Spring Security, porque el gateway es WebFlux (T60). En un servicio MVC serían `@EnableWebSecurity` y `HttpSecurity`.
+- **`SecurityWebFilterChain`:** la cadena de filtros de seguridad que se aplica a **cada** pedido antes de rutearlo. Es el "Security Filter" del apunte.
+- **`csrf(...disable)`:** CSRF es un ataque que aprovecha las cookies de sesión que el navegador manda solo. Nuestra API no usa cookies ni sesión: el token viaja en un header que el atacante no puede hacer que el navegador agregue. Por eso la protección no aplica, y si la dejáramos, rechazaría todos los `POST`, `PUT`, `PATCH` y `DELETE`.
+- **El orden de las reglas importa:** Spring aplica **la primera que coincide**. Por eso `GET /api/espacios/**` (los dos roles) va antes que `/api/espacios/**` (solo ADMIN): si estuviera al revés, un USUARIO no podría ni listar espacios.
+- **`"/api/reservas"` sin `/**`:** coincide solo con el listado general (`GET /api/reservas` y `GET /api/reservas?estado=...`, porque los parámetros no forman parte del path). `GET /api/reservas/mias` no coincide, y cae en la regla de USUARIO.
+- **`"/api/reservas/*/aprobar"`:** `*` es exactamente **un** segmento (el id). `**` serían cualquier cantidad.
+- **`anyExchange().denyAll()`:** todo lo que no está en la lista se rechaza. Es una lista blanca: si mañana se agrega un endpoint y nadie escribe su regla, queda cerrado, no abierto.
+- **`hasRole("ADMIN")` busca `ROLE_ADMIN`:** Spring agrega el prefijo `ROLE_` al comparar. Por eso el convertidor les pone ese prefijo a los roles de Keycloak.
+- **Por qué existe ese prefijo:** Spring Security guarda todos los permisos del usuario en una sola lista de *authorities*, que son simples textos. Ahí pueden convivir cosas distintas: roles (`ROLE_ADMIN`), scopes de OAuth2 (`SCOPE_profile`) o permisos sueltos (`reservas:aprobar`). El prefijo es la convención para saber cuáles de esos textos son **roles**. `hasRole("ADMIN")` es solo un atajo de `hasAuthority("ROLE_ADMIN")`; incluso `hasRole("ROLE_ADMIN")` da error, porque Spring ya agrega el prefijo.
+- **Alternativa equivalente:** no poner el prefijo en el convertidor y usar `hasAuthority("ADMIN")` en las reglas. Funciona igual; elegimos `hasRole` porque es lo que usa el plan, y porque se lee mejor: en el enunciado y en Keycloak son *roles*.
+- **`oauth2ResourceServer(o -> o.jwt(...))`:** activa la validación del JWT con las dos URLs del `application.yaml` y le dice que use nuestro convertidor para sacar los roles.
+- **Por qué hace falta el convertidor:** por defecto, Spring toma los permisos del claim `scope` (y los prefija `SCOPE_`). Keycloak pone los roles del realm en `realm_access.roles`, que Spring no conoce.
+- **`instanceof Collection<?> roles`:** *pattern matching* de Java: pregunta si el valor es una colección y, si lo es, ya lo deja en la variable `roles`. Si el token no trae roles, devuelve una lista vacía y el usuario queda autenticado pero sin permisos (403 en todo).
+- **`ReactiveJwtAuthenticationConverterAdapter`:** `JwtAuthenticationConverter` es la versión común (bloqueante); el adapter lo envuelve para que devuelva un `Mono`, como espera la cadena reactiva.
+- **ADMIN no crea reservas:** la regla de `/api/reservas/**` es solo para USUARIO, como dice la tabla de roles de la Entrega 1: bedelía administra, no reserva.
+- **Los 401 y 403 salen sin cuerpo:** los genera Spring Security antes de llegar a nuestro código, así que no tienen nuestro `ApiResponse`. El código HTTP alcanza para saber qué pasó (T11).
+- **El orden del código no es el orden de ejecución:** `securityFilter` se ejecuta **una sola vez, al arrancar**, y lo que hace es *armar* la cadena de filtros; no procesa ningún pedido. En ese momento también se llama a `rolesDeKeycloak()`, que devuelve el convertidor y queda guardado adentro de la cadena. Después, **en cada pedido**, Spring Security corre sus filtros en un orden fijo, sin importar en qué orden los escribimos: primero el de **autenticación** (lee el `Bearer`, valida el JWT y, con nuestro convertidor, arma el usuario con `ROLE_USUARIO` o `ROLE_ADMIN`; si falla, 401), y recién después el de **autorización** (recorre las reglas de `authorizeExchange` y compara con esos roles; si no alcanza, 403). Que `hasRole` aparezca antes en el código que `oauth2ResourceServer` es solo el orden en que se configura, como llenar un formulario.
+- **Dónde está el método en la clase tampoco importa:** en Java, que `rolesDeKeycloak()` esté escrito abajo de `securityFilter` no cambia nada; se puede llamar a un método declarado más abajo.
+
+**`UsuarioHeaderFilter`: el header `X-Usuario`**
+
+> "Es un filtro global del gateway: se ejecuta en todos los pedidos que se rutean, después de la seguridad y antes de reenviarlos. Hace dos cosas. Primero **borra** cualquier `X-Usuario` que haya mandado el cliente, porque no se le puede creer: cualquiera podría escribir `X-Usuario: usuario1` a mano. Después saca el `preferred_username` del JWT, que ya validó el Security Filter, y lo agrega como `X-Usuario`. Así ms-reservas sabe quién reserva y quién cancela (RN7) sin tener que validar tokens (D8)."
+
+Ideas clave por si repreguntan:
+
+- **`GlobalFilter`:** un filtro de Spring Cloud Gateway que se aplica a **todas** las rutas, sin tener que agregarlo a cada una. El otro tipo, `GatewayFilter`, se agrega ruta por ruta.
+- **Por qué después de la seguridad:** el `SecurityWebFilterChain` es un filtro web que corre antes que los filtros del gateway. Cuando llega acá, el pedido ya tiene un JWT válido y un rol permitido; si no, ya se cortó con 401 o 403.
+- **Por qué primero se borra:** si el cliente manda `X-Usuario: usuario2` con el token de `usuario1`, sin el borrado usuario1 podría cancelar reservas de usuario2. Con el borrado, el único `X-Usuario` que llega es el que puso el gateway a partir del token. Lo probamos en la tabla 7.4.
+- **`exchange.mutate().request(...)`:** los pedidos en WebFlux son inmutables; para cambiar un header se arma una copia modificada del *exchange* (pedido + respuesta) y se sigue con esa.
+- **`getPrincipal()`:** devuelve el usuario autenticado, como un `Mono` porque es reactivo. Con JWT es un `JwtAuthenticationToken`, que tiene el token con todos sus claims.
+- **`filter(...isInstance).cast(...)`:** se queda solo con autenticaciones por JWT. Si por algún motivo no hubiera una, el `Mono` queda vacío.
+- **`preferred_username`:** el nombre de usuario de Keycloak (`usuario1`, `admin1`). Usamos este y no `sub`, que es un UUID: es más legible en las reservas y en los logs, y en el realm es único.
+- **`defaultIfEmpty(limpio)`:** si no hay usuario, se sigue con el pedido limpio, sin `X-Usuario`. Con nuestras reglas no pasa, porque todo exige token, pero así el filtro nunca corta un pedido por su cuenta.
+- **`flatMap(chain::filter)`:** le pasa el exchange (ya con el header) al siguiente filtro de la cadena, que termina reenviándolo al microservicio.
+- **Va en el paquete `filters`:** separado de `config`, porque no es configuración sino código que se ejecuta en cada pedido.
+
+---
+
 ## Decisiones que tomamos
 
 Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las D1 a D25 del plan de desarrollo, y algunas se apoyan en ellas.
@@ -857,3 +965,41 @@ Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las
   - Cancelar dos veces → 409; espacio 999 → 404; equipamiento PILETA → 422; sin header → 400; estado inválido → 400.
   - **ms-espacios apagado:** crear y buscar → 503; `GET /mias` → 200, con los nombres de los espacios (D11).
 - **Lo que no corrimos acá:** RN4 con lluvia (`CLIMA_UMBRAL=0`). Ya está probado en ms-espacios (T42), y ms-reservas solo reenvía su motivo.
+
+### api-gateway: proyecto
+
+**T60. Gateway reactivo (`gateway-server-webflux`) y no el de Spring MVC**
+- **Decisión:** en Initializr elegimos **Reactive Gateway**, no **Gateway** (que en Spring Cloud 2025 es `gateway-server-webmvc`).
+- **Por qué:** es lo que pide el plan y lo que muestra el apunte 19, con `RouteLocator`, `GlobalFilter` y `SecurityWebFilterChain`. Además, un gateway casi no procesa: espera respuestas de otros servicios, y el modelo reactivo atiende muchos pedidos en espera con pocos hilos.
+- **Descartamos:** la versión MVC. Funcionaría parecido, pero cambian las clases de rutas, filtros y seguridad respecto del material de la materia, y tendríamos un tercer estilo de código en el TP.
+
+**T61. El gateway no depende de `campus-commons`, ni de Lombok, ni de springdoc**
+- **Decisión:** el `pom.xml` queda solo con las dos dependencias de Initializr (más las de test).
+- **Por qué:** el gateway no tiene controllers, ni entidades, ni excepciones de negocio. El `GlobalExceptionHandler` del JAR común es de Spring MVC (`@RestControllerAdvice` sobre servlets) y no se aplica en WebFlux. Por eso la clase principal tampoco necesita `scanBasePackages`. El JAR común sigue siendo de los dos microservicios, como dice D13.
+- **Descartamos:** agregar Spring Web (`starter-webmvc`) "por las dudas": con Spring MVC en el classpath, Boot levanta la aplicación como servlet (Tomcat) y el gateway reactivo se niega a arrancar, con el aviso de que Spring MVC es incompatible con Spring Cloud Gateway.
+
+### api-gateway: código y cierre de la Fase 3
+
+**T62. El nombre del header en una constante**
+- **Decisión:** `UsuarioHeaderFilter` usa `HEADER = "X-Usuario"` en vez de escribir el texto dos veces, como en el plan.
+- **Por qué:** el filtro borra y vuelve a poner el mismo header; si uno de los dos estuviera mal escrito, el borrado no serviría y el cliente podría mandar un `X-Usuario` falso. Con la constante, eso no puede pasar. Es lo mismo que hace `ReservaController` del otro lado (`USUARIO = "X-Usuario"`).
+
+**T63. El filtro va en el paquete `filters`**
+- **Decisión:** `GatewayConfig` y `SecurityConfig` van en `config`; `UsuarioHeaderFilter`, en `filters`.
+- **Por qué:** las dos primeras se ejecutan una vez al arrancar y arman la configuración; el filtro se ejecuta en cada pedido. Separarlos deja claro qué es qué, igual que en los microservicios cada capa tiene su paquete.
+
+**T64. Verificamos el criterio de terminado de la Fase 3 contra Keycloak**
+- **Decisión:** con Keycloak, ms-espacios, ms-reservas y el gateway corriendo, pedimos tokens reales de `usuario1`, `usuario2` y `admin1` y recorrimos la tabla 7.4 del plan, siempre contra `http://localhost:8080`. Todos dieron el código esperado:
+  - `GET /api/espacios` sin token → 401; con usuario1 → 200.
+  - `POST /api/espacios` con usuario1 → 403; con admin1 → 201.
+  - `GET /api/reservas/disponibilidad` con usuario1 → 200 con el Aula 101.
+  - `POST /api/reservas` con usuario1 → 201, con `"usuario":"usuario1"` en la respuesta.
+  - `GET /api/reservas` con usuario1 → 403; con admin1 → 200.
+  - Token modificado a mano → 401.
+  - `PATCH /aprobar` con usuario1 → 403; `GET ?estado=PENDIENTE` con admin1 → 200; `PATCH /aprobar` con admin1 → 200 y el evento pasa a CONFIRMADA.
+- **Casos extra que agregamos:**
+  - **`X-Usuario` falso:** usuario1 creó la reserva mandando además `X-Usuario: usuario2`, y la reserva quedó a nombre de **usuario1**. El gateway borró el header del cliente.
+  - **usuario2 cancela la reserva de usuario1 → 403:** este 403 no lo da el gateway (usuario2 tiene el rol USUARIO, la ruta está permitida), sino ms-reservas (RN7), con el `X-Usuario` que puso el gateway.
+  - **admin1 crea una reserva → 403:** la ruta es solo para USUARIO.
+  - **Ruta que no existe (`/api/otra`) con token válido → 403:** la corta `denyAll()`; nunca llega a ningún servicio.
+- **Lo que no corrimos acá:** el token **vencido** (los de Keycloak duran 5 minutos; el modificado a mano prueba el mismo camino, la firma o los claims no validan) y la colección de Postman, que queda para la Fase 4 junto con el resto de la documentación.
