@@ -39,7 +39,12 @@
 			<groupId>org.springframework.cloud</groupId>
 			<artifactId>spring-cloud-starter-gateway-server-webflux</artifactId>
 		</dependency>
-
+		<!-- Nuestro JAR común: solo usamos ApiResponse, para que el 503 tenga el mismo formato -->
+		<dependency>
+			<groupId>ar.edu.utn.frc.bda</groupId>
+			<artifactId>campus-commons</artifactId>
+			<version>1.0.0</version>
+		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-security-oauth2-resource-server-test</artifactId>

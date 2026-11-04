@@ -89,6 +89,7 @@ Ideas clave por si repreguntan:
 - **Por qué una clase por situación y no una sola con el código:** el handler elige el código por el **tipo** de la excepción, y el service expresa *qué pasó* (un conflicto, una regla) sin saber nada de HTTP.
 - **422 vs. 400:** 400 es "el pedido está mal formado" (falta un campo, una fecha que no es fecha). 422 es "está bien formado, pero una regla de negocio no lo permite".
 - **409 vs. 422:** 409 es un choque con el **estado actual** del recurso (otra reserva ya ocupa la franja, la reserva ya está cancelada). Con otro estado, el mismo pedido podría pasar. 422 es que el pedido en sí viola una regla, sin importar el estado (50 personas en un aula para 40).
+- **500 vs. 503:** los dos son errores del servidor, pero dicen cosas distintas. 500 es "algo se rompió adentro": un bug nuestro (un `NullPointerException`, un caso no previsto), reintentar no sirve y el log lo marca con ERROR y el stack trace (T10). 503 es "ahora no puedo atenderte": no hay ningún bug, falla algo de lo que dependemos (ms-espacios, Open-Meteo), es temporal y reintentar más tarde sí sirve. Por eso nunca respondemos 500 por una dependencia caída: el código HTTP ya le dice al cliente si el problema es nuestro o externo, y si tiene sentido reintentar.
 - **403 acá vs. 403 del gateway:** el gateway da 403 cuando el **rol** no alcanza. Esta excepción es para cuando el rol está bien, pero el recurso no es tuyo (RN7). Eso solo lo sabe `ms-reservas`.
 - **`super(mensaje)`:** guarda el mensaje en la excepción; el handler lo recupera con `getMessage()` y lo pone en el `message` del `ApiResponse`.
 
@@ -531,7 +532,7 @@ Ideas clave por si repreguntan:
 
 **Cómo se creó el proyecto y qué tiene el `pom.xml`**
 
-> "Lo generamos con Spring Initializr igual que los microservicios: Maven, Java 25, Spring Boot 4.1.2 y el paquete `ar.edu.utn.frc.bda.campus.gateway`. Tiene solo dos dependencias: **Reactive Gateway**, que hace el ruteo, y **OAuth2 Resource Server**, que valida el JWT. Como el gateway es parte de Spring Cloud y no de Spring Boot, el `pom.xml` además importa la BOM de Spring Cloud (`spring-cloud-dependencies` 2025.1.4), que fija las versiones de todo lo de Spring Cloud compatibles con Boot 4.1. No tiene base de datos, ni controllers, ni Lombok, ni el JAR común: no guarda nada y no tiene lógica de negocio, solo rutea y controla el acceso."
+> "Lo generamos con Spring Initializr igual que los microservicios: Maven, Java 25, Spring Boot 4.1.2 y el paquete `ar.edu.utn.frc.bda.campus.gateway`. Tiene solo dos dependencias: **Reactive Gateway**, que hace el ruteo, y **OAuth2 Resource Server**, que valida el JWT. Como el gateway es parte de Spring Cloud y no de Spring Boot, el `pom.xml` además importa la BOM de Spring Cloud (`spring-cloud-dependencies` 2025.1.4), que fija las versiones de todo lo de Spring Cloud compatibles con Boot 4.1. No tiene base de datos, ni controllers, ni Lombok: no guarda nada y no tiene lógica de negocio, solo rutea y controla el acceso. Del JAR común usa solo `ApiResponse`, para responder el 503 cuando un servicio no responde (lo sumamos en la Fase 4, T61)."
 
 Las dependencias, una por una:
 
@@ -539,6 +540,7 @@ Las dependencias, una por una:
 |---|---|
 | `spring-cloud-starter-gateway-server-webflux` | Spring Cloud Gateway en su versión **reactiva** (WebFlux sobre Netty). Trae el `RouteLocator` para declarar las rutas, los filtros (`GlobalFilter`) para modificar pedidos, y el cliente HTTP que reenvía cada pedido al microservicio. |
 | `spring-boot-starter-security-oauth2-resource-server` | Spring Security + soporte de **Resource Server**: lee el header `Authorization: Bearer <jwt>`, baja las claves públicas de Keycloak, verifica la firma, el emisor (`iss`) y el vencimiento (`exp`), y arma el usuario autenticado con sus roles. Es lo que usa nuestro `SecurityWebFilterChain`. |
+| `campus-commons` (agregada a mano) | Nuestro JAR común, solo por `ApiResponse`: el formato del 503 de `ServicioCaidoFilter` (T61). |
 | `spring-boot-starter-security-oauth2-resource-server-test` (test) | Utilidades para probar la seguridad sin Keycloak (por ejemplo, simular un JWT con un rol). Solo se usa en los tests. |
 | `reactor-test` (test) | Herramientas para probar código reactivo (`Mono`, `Flux`), como `StepVerifier`. Solo se usa en los tests. |
 | BOM `spring-cloud-dependencies` (en `dependencyManagement`) | No agrega ninguna librería: solo fija las versiones de Spring Cloud. Por eso la dependencia del gateway va **sin** `<version>`. |
@@ -555,7 +557,7 @@ Ideas clave por si repreguntan:
 
 **`application.yaml`**
 
-> "Es la configuración del gateway, y tiene tres partes. El puerto 8080. La configuración del Resource Server, con dos URLs de Keycloak: `issuer-uri`, el emisor que exigimos que diga el token, y `jwk-set-uri`, de donde bajamos las claves públicas para verificar la firma. Y nuestras propiedades propias con las URLs de los dos microservicios, que usa el `RouteLocator` para saber a dónde reenviar cada pedido. Igual que en los microservicios, lo que cambia entre el IDE y Docker se puede pisar con una variable de entorno."
+> "Es la configuración del gateway, y tiene cuatro partes. El puerto 8080. El tiempo máximo para conectarse con un microservicio, 2 segundos. La configuración del Resource Server, con dos URLs de Keycloak: `issuer-uri`, el emisor que exigimos que diga el token, y `jwk-set-uri`, de donde bajamos las claves públicas para verificar la firma. Y nuestras propiedades propias con las URLs de los dos microservicios, que usa el `RouteLocator` para saber a dónde reenviar cada pedido. Igual que en los microservicios, lo que cambia entre el IDE y Docker se puede pisar con una variable de entorno."
 
 Ideas clave por si repreguntan:
 
@@ -565,6 +567,7 @@ Ideas clave por si repreguntan:
 - **Por qué dos URLs y no una (sección 7.3 del plan):** el token que pide Postman dice `iss: http://localhost:8180/...`, porque Postman habló con `localhost:8180`. Pero dentro de Docker el gateway llega a Keycloak como `http://keycloak:8080`. Entonces el emisor queda fijo en `localhost:8180` (lo que dice el token), y solo cambia la dirección desde donde se bajan las claves, con la variable `JWK_SET_URI` en el `docker-compose.yml` (Fase 4).
 - **Si solo pusiéramos `issuer-uri`:** Spring buscaría las claves en `localhost:8180` también desde Docker, donde `localhost` es el propio contenedor del gateway, y no las encontraría.
 - **`campus.ms-espacios-url` y `campus.ms-reservas-url`:** propiedades nuestras (el prefijo `campus` lo inventamos, como en los microservicios, T15). Desde el IDE, cada servicio está en `localhost`; en Docker valen `http://ms-espacios:8081` y `http://ms-reservas:8082`, el nombre de cada servicio en la red interna.
+- **`spring.cloud.gateway.server.webflux.httpclient.connect-timeout: 2000`:** cuántos milisegundos espera el gateway para abrir la conexión con un microservicio. Sin esto usa el de Netty, que es de 30 segundos: con ms-espacios caído, el usuario esperaba medio minuto para recibir el 503. Con 2 segundos queda igual que el `EspaciosClient` de ms-reservas (T70).
 - **`spring.application.name`:** el nombre de la aplicación; aparece en los logs (`[api-gateway]`). Lo dejamos, como en los microservicios, aunque el bloque original del plan no lo tenía.
 
 **`GatewayConfig`: las rutas**
@@ -624,6 +627,75 @@ Ideas clave por si repreguntan:
 - **`defaultIfEmpty(limpio)`:** si no hay usuario, se sigue con el pedido limpio, sin `X-Usuario`. Con nuestras reglas no pasa, porque todo exige token, pero así el filtro nunca corta un pedido por su cuenta.
 - **`flatMap(chain::filter)`:** le pasa el exchange (ya con el header) al siguiente filtro de la cadena, que termina reenviándolo al microservicio.
 - **Va en el paquete `filters`:** separado de `config`, porque no es configuración sino código que se ejecuta en cada pedido.
+
+**`ServicioCaidoFilter`: 503 si el microservicio no responde**
+
+> "Es otro filtro global del gateway, que envuelve a todos los demás. Si al reenviar el pedido el microservicio no responde, porque está apagado o su contenedor se detuvo, Spring Cloud Gateway por defecto devuelve un 500 genérico, con su propio formato. Este filtro atrapa ese error y responde **503** con nuestro `ApiResponse`, 'El servicio no está disponible', igual que hacen los microservicios cuando falla una dependencia. Además deja una línea WARN en el log con la ruta que no respondió. Así cumplimos lo que prometimos en D4 y D25: una falla de otro servicio nunca termina en un 500."
+
+Ideas clave por si repreguntan:
+
+- **Por qué importa:** el 500 que daba el gateway decía algo falso. Le avisaba al cliente "está roto, no reintentes", cuando en realidad era "el servicio no está, esperá y reintentá" (ver 500 vs. 503 en las excepciones).
+- **Cómo lo encontramos:** con todo en Docker apagamos ms-espacios (`docker compose stop ms-espacios`) y pedimos `GET /api/espacios` por el gateway: daba **500**. Crear y buscar reservas ya daban 503, porque esos pedidos pasan por ms-reservas, que traduce el error en su `EspaciosClient`. Pero listar espacios va directo del gateway a ms-espacios, y ahí nadie lo traducía.
+- **`implements GlobalFilter, Ordered` y `getOrder()`:** `Ordered` le dice al gateway en qué lugar de la cadena va el filtro. `HIGHEST_PRECEDENCE` lo pone **primero**, para que envuelva a todos los demás, incluido el que reenvía el pedido al microservicio: cualquier error que salga de la cadena pasa por acá.
+- **El logger a mano:** `private static final Logger log = LoggerFactory.getLogger(ServicioCaidoFilter.class);` es exactamente lo que genera `@Slf4j` en los microservicios. Acá se escribe a mano porque el gateway no usa Lombok (T61), igual que en el JAR común. Por eso hacen falta los dos imports: `org.slf4j.Logger` (el tipo) y `org.slf4j.LoggerFactory` (el que lo crea).
+- **`chain.filter(exchange).onErrorResume(condición, reemplazo)`:** es el `try/catch` del mundo reactivo. Deja seguir el pedido normalmente y, **solo si** termina con un error que cumple la condición, lo reemplaza por nuestra respuesta 503. Cualquier otro error sigue su camino.
+- **`esServicioCaido`:** recorre la cadena de causas del error (`getCause()`), porque la excepción original suele venir envuelta en otras. Busca dos:
+  - **`ConnectException`:** no se pudo abrir la conexión, porque el servicio no está escuchando ("Connection refused").
+  - **`UnknownHostException`:** no existe el nombre. Es lo que pasa en Docker con un contenedor detenido: el DNS interno ya no resuelve `ms-espacios`.
+- **`responder503`:** arma la respuesta a mano: código 503, `Content-Type: application/json` y nuestro `ApiResponse` convertido a JSON con el `JsonMapper` que ya configura Spring Boot (Jackson 3). En WebFlux, el cuerpo se escribe como un `DataBuffer` dentro de un `Mono`.
+- **Por qué ahora el gateway usa `campus-commons`:** solo por `ApiResponse`, para que el 503 tenga exactamente el mismo formato que el resto de la API. El `GlobalExceptionHandler` del JAR común no se activa en el gateway, porque su paquete (`...campus.commons`) no se escanea. Ver T61.
+- **El timeout de conexión va en el `application.yaml`:** el filtro decide **qué** responder; cuánto se espera antes de darse por vencido lo fija `connect-timeout: 2000` (T70). Un `ConnectTimeoutException` de Netty hereda de `ConnectException`, así que el filtro también lo atrapa.
+- **Por qué no un circuit breaker:** D4. Un timeout y un 503 claro alcanzan para este TP; un circuit breaker suma estados y configuración que hay que explicar y probar.
+- **Probado:** con el servicio apuntando a un puerto donde no escucha nadie (conexión rechazada) y a un host que no existe, los dos casos dieron 503 con el `ApiResponse` y su WARN en el log. Un pedido sin token sigue dando 401, porque la seguridad corre antes que los filtros del gateway. En Docker, con `docker compose stop ms-espacios`, `GET /api/espacios` da 503 en 2 segundos (antes del timeout, 30).
+
+---
+
+## Fase 4: Docker Compose y cierre
+
+**`build.sh`: compilar todo en orden**
+
+> "Es un script que deja todo compilado en un solo paso, desde la raíz del repo. Primero instala `campus-commons` en el repositorio local de Maven (`~/.m2`), porque los dos microservicios lo declaran como dependencia y Maven lo busca ahí. Después empaqueta ms-espacios, ms-reservas y el gateway, cada uno en su JAR ejecutable dentro de su carpeta `target/`. Esos JAR son los que después copia cada `Dockerfile`. Si cualquier paso falla, el script se corta, así nunca se arman imágenes con un JAR viejo."
+
+Ideas clave por si repreguntan:
+
+- **`#!/bin/sh` (shebang):** la primera línea le dice al sistema con qué intérprete correr el archivo. `sh` está en Linux, en Mac y en Git Bash de Windows. En PowerShell no existe ("El término sh no se reconoce"): ahí se corre con `& "C:\Program Files\Git\bin\bash.exe" build.sh`, o directamente desde una terminal de Git Bash.
+- **`set -e`:** si un comando termina con error, el script se detiene en ese momento. Sin esto, si falla `campus-commons`, igual intentaría compilar los servicios y daría errores confusos ("no encuentro campus-commons").
+- **Por qué el orden importa:** `campus-commons` no se publica en ningún repositorio de internet; solo existe en el `.m2` de cada máquina después del `mvn install`. Si un servicio se compila antes, Maven no encuentra la dependencia.
+- **`install` vs. `package`:** `package` arma el JAR en `target/`; `install` además lo copia al `.m2` para que otros proyectos lo usen. Solo `campus-commons` necesita `install`, porque es una librería; los demás son aplicaciones y alcanza con `package`.
+- **`mvn -f carpeta/pom.xml`:** corre Maven sobre ese `pom.xml` sin tener que entrar a la carpeta con `cd`.
+- **`clean`:** borra `target/` antes de compilar, así no quedan clases de una versión anterior.
+- **`-DskipTests`:** saltea los tests para que el empaquetado sea rápido. Los tests se corren aparte (`./mvnw verify` en cada proyecto, como dice la guía de pruebas).
+- **Por qué compilar afuera de Docker (D22):** cada imagen solo copia su JAR. Si compiláramos adentro (*multi-stage*), cada imagen necesitaría `campus-commons` dentro de su contexto de build, y el build sería más lento.
+- **En Windows, antes hay que apagar los servicios:** mientras un servicio corre, Windows bloquea su JAR y `clean` no puede borrar `target/`. Con `set -e`, el script se corta en ese paso.
+
+**`Dockerfile`: la imagen de cada aplicación**
+
+> "Es la receta para armar la imagen de Docker de una aplicación, y es la misma para las tres: ms-espacios, ms-reservas y el gateway. Parte de una imagen que ya trae Java 25 (`eclipse-temurin:25-jre`), copia el JAR que dejó `build.sh` en `target/` y define el comando que se ejecuta cuando arranca el contenedor: `java -jar app.jar`. No compila nada; solo empaqueta lo ya compilado."
+
+Ideas clave por si repreguntan:
+
+- **Imagen vs. contenedor:** la imagen es la plantilla, de solo lectura, con el sistema, Java y nuestro JAR. El contenedor es una instancia de esa imagen corriendo, con su propio sistema de archivos, su red y sus procesos. Con una imagen se pueden levantar varios contenedores.
+- **`FROM eclipse-temurin:25-jre`:** la imagen base. Eclipse Temurin es la distribución de OpenJDK de Adoptium, la misma que tenemos instalada. Es **JRE** y no JDK porque en el contenedor solo hace falta *ejecutar* Java, no compilar: la imagen pesa menos y tiene menos herramientas que un atacante pueda usar.
+- **`WORKDIR /app`:** la carpeta de trabajo dentro del contenedor (la crea si no existe). Los comandos que siguen corren ahí, y ahí queda la base H2 (`./data` → `/app/data`).
+- **`COPY target/*.jar app.jar`:** copia el JAR desde la carpeta del proyecto (el *contexto de build*) a la imagen, con un nombre fijo. El `*` evita escribir la versión (`0.0.1-SNAPSHOT`) y hace que el mismo `Dockerfile` sirva para los tres proyectos.
+- **`ENTRYPOINT ["java", "-jar", "app.jar"]`:** el comando principal del contenedor. Está en formato JSON (*exec form*): Java es el proceso principal y recibe directamente la señal de apagado (`docker compose stop`), así Spring cierra prolijo (el *graceful shutdown* que se ve en el log).
+- **Por qué sin `EXPOSE`:** `EXPOSE` solo documenta el puerto, no lo publica. Lo que decide qué es accesible desde afuera es `ports` en el `docker-compose.yml`. Lo dejamos afuera para que sea el mismo archivo en los tres proyectos (cada uno escucha en un puerto distinto).
+
+**`docker-compose.yml`: todo el sistema con un comando**
+
+> "Describe los cuatro contenedores del sistema y cómo se conectan: Keycloak, ms-espacios, ms-reservas y el gateway. Con `docker compose up --build`, Docker arma las tres imágenes con sus `Dockerfile` y levanta todo. Compose crea una red interna donde cada contenedor se llama por su nombre de servicio (`http://ms-espacios:8081`). Lo más importante es qué **no** está: ms-espacios y ms-reservas no tienen `ports`, así que desde afuera no se puede llegar a ellos. Solo se publican el gateway (8080) y Keycloak (8180). Esa red interna es nuestra *trusted zone*: lo único que llega a los microservicios pasa antes por el Security Filter, y por eso pueden confiar en el `X-Usuario`. Todo lo que cambia entre el IDE y Docker (las URLs de los servicios y de las claves de Keycloak) se pasa con variables de entorno, que pisan los valores por defecto del `application.yaml`: el mismo JAR corre en los dos lados sin cambiar código."
+
+Ideas clave por si repreguntan:
+
+- **`services`:** cada entrada es un contenedor. `image` usa una imagen ya hecha (Keycloak); `build` arma una con el `Dockerfile` de esa carpeta.
+- **`ports: ["8080:8080"]`:** `máquina:contenedor`. Publica el puerto del contenedor en la máquina. Sin `ports`, el contenedor sigue escuchando, pero solo para la red interna.
+- **La trusted zone, probada:** con todo en Docker, `curl localhost:8081` y `curl localhost:8082` no responden; por el gateway, sí.
+- **Nombres de servicio como hosts:** el DNS interno de Compose resuelve `ms-espacios` a la IP de ese contenedor. Por eso `MS_ESPACIOS_URL: http://ms-espacios:8081` y no `localhost`: dentro de un contenedor, `localhost` es el propio contenedor.
+- **`JWK_SET_URI: http://keycloak:8080/...`:** el gateway baja las claves por la red interna (puerto **interno** de Keycloak, 8080). El emisor sigue siendo `localhost:8180`, que es lo que dice el token que pide Postman (ver la sección `application.yaml` del gateway).
+- **`depends_on`:** ordena el **arranque** (ms-reservas después de ms-espacios, el gateway al final), pero no espera a que el otro esté listo. No hace falta más: el gateway baja las claves de Keycloak recién en el primer pedido, y ms-reservas llama a ms-espacios recién cuando alguien reserva.
+- **`TZ: America/Argentina/Cordoba`:** ver T68.
+- **Las bases H2 viven dentro de cada contenedor** (`/app/data`): sobreviven a `docker compose stop` y `start`, pero se pierden con `docker compose down`, que borra los contenedores. Ver T69.
+- **`--build`:** obliga a rearmar las imágenes. Hace falta cada vez que se corre `build.sh` de nuevo, porque si no, Docker usa la imagen vieja con el JAR anterior.
 
 ---
 
@@ -1013,9 +1085,10 @@ Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las
 - **Por qué:** es lo que pide el plan y lo que muestra el apunte 19, con `RouteLocator`, `GlobalFilter` y `SecurityWebFilterChain`. Además, un gateway casi no procesa: espera respuestas de otros servicios, y el modelo reactivo atiende muchos pedidos en espera con pocos hilos.
 - **Descartamos:** la versión MVC. Funcionaría parecido, pero cambian las clases de rutas, filtros y seguridad respecto del material de la materia, y tendríamos un tercer estilo de código en el TP.
 
-**T61. El gateway no depende de `campus-commons`, ni de Lombok, ni de springdoc**
-- **Decisión:** el `pom.xml` queda solo con las dos dependencias de Initializr (más las de test).
-- **Por qué:** el gateway no tiene controllers, ni entidades, ni excepciones de negocio. El `GlobalExceptionHandler` del JAR común es de Spring MVC (`@RestControllerAdvice` sobre servlets) y no se aplica en WebFlux. Por eso la clase principal tampoco necesita `scanBasePackages`. El JAR común sigue siendo de los dos microservicios, como dice D13.
+**T61. El gateway usa `campus-commons` solo por `ApiResponse`; nada de Lombok ni springdoc**
+- **Decisión:** el `pom.xml` tiene las dos dependencias de Initializr (más las de test) y `campus-commons`. No tiene Lombok ni springdoc.
+- **Por qué:** el gateway no tiene controllers, ni entidades, ni excepciones de negocio. Al principio tampoco usaba el JAR común. Lo sumamos con `ServicioCaidoFilter`, para que el 503 tenga el mismo `ApiResponse` que el resto de la API (D25) en vez de copiar el record. El `GlobalExceptionHandler` del JAR común es de Spring MVC (`@RestControllerAdvice` sobre servlets) y no se aplica en WebFlux; como la clase principal no tiene `scanBasePackages`, Spring ni siquiera lo encuentra.
+- **Descartamos:** copiar `ApiResponse` dentro del gateway. Es un record de cuatro campos, pero duplicarlo es justo lo que el JAR común evita (D13): si mañana cambia el formato, cambia en un solo lugar.
 - **Descartamos:** agregar Spring Web (`starter-webmvc`) "por las dudas": con Spring MVC en el classpath, Boot levanta la aplicación como servlet (Tomcat) y el gateway reactivo se niega a arrancar, con el aviso de que Spring MVC es incompatible con Spring Cloud Gateway.
 
 ### api-gateway: código y cierre de la Fase 3
@@ -1044,6 +1117,24 @@ Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las
   - **Ruta que no existe (`/api/otra`) con token válido → 403:** la corta `denyAll()`; nunca llega a ningún servicio.
 - **Lo que no corrimos acá:** el token **vencido** (los de Keycloak duran 5 minutos; el modificado a mano prueba el mismo camino, la firma o los claims no validan) y la colección de Postman, que queda para la Fase 4 junto con el resto de la documentación.
 
+### Docker Compose
+
+**T68. Zona horaria de Argentina en los contenedores (`TZ`)**
+- **Decisión:** los tres contenedores nuestros llevan `TZ: America/Argentina/Cordoba` en el `docker-compose.yml`. El plan no lo tenía.
+- **Por qué:** las imágenes de Docker corren en UTC. Lo verificamos: a las 09:48 de acá, un contenedor de `eclipse-temurin:25-jre` sin `TZ` marcaba 12:48. Nuestras reglas comparan con `LocalDateTime.now()` (RN1: que la reserva sea futura; RN7: cancelar antes de que empiece; RN10: 24 h para el laboratorio) y las fechas del usuario están en hora de Argentina. En UTC, el sistema estaría tres horas adelantado: a las 9 de la mañana rechazaría por "pasada" una reserva para las 11. Con `TZ`, Java toma la hora local (los logs salen con `-03:00`) y una reserva para dentro de dos horas se crea bien. También lo probamos.
+- **Descartamos:** cambiar el código para usar `ZonedDateTime` o un `Clock` con zona fija: más cambios en todas las reglas para resolver algo que es de configuración del entorno. Tampoco `-Duser.timezone` en el `Dockerfile`: quedaría escondido en la imagen, y con `TZ` también el sistema del contenedor (el comando `date`) da la hora correcta.
+
+**T69. Sin volúmenes para las bases H2**
+- **Decisión:** las bases quedan dentro de cada contenedor, sin `volumes`.
+- **Por qué:** para el TP alcanza con que sobrevivan a un `stop` y `start` (D10), y que `down` las borre es útil: cada demo arranca limpia, con los 5 espacios de prueba y los ids de las reservas desde 1, como en la guía.
+- **Descartamos:** un volumen por servicio. Es lo que se haría en producción, pero obligaría a borrarlos a mano (`docker compose down -v`) antes de cada demo.
+
+**T70. El gateway espera como máximo 2 segundos para conectarse con un microservicio**
+- **Decisión:** `spring.cloud.gateway.server.webflux.httpclient.connect-timeout: 2000` en el `application.yaml` del gateway.
+- **Por qué:** al probar la guía en Docker, con ms-espacios apagado, `GET /api/espacios` tardaba **30 segundos** en dar el 503. El gateway todavía tenía guardada la IP del contenedor, y conectarse a una IP donde ya no hay nadie no falla enseguida: espera hasta el timeout de Netty, que por defecto es de 30 s. Crear y buscar reservas daban 503 al instante porque el `RestClient` de ms-reservas ya tenía 2 s para conectar y 3 para leer (`RestClientConfig`). Con el mismo valor en el gateway, los dos caminos se comportan igual.
+- **Probado:** con la IP guardada, 503 en 2,0 s (el log dice `connection timed out after 2000 ms`); con el gateway recién levantado, el nombre `ms-espacios` ya no resuelve y da 503 por `Failed to resolve`.
+- **Descartamos:** un `response-timeout` (cuánto esperar la respuesta, una vez conectado). Ningún pedido nuestro tarda tanto: el más lento es la búsqueda de disponibles, y ese ya tiene sus propios timeouts para ms-espacios y Open-Meteo.
+
 ### Logs
 
 **T65. Un nivel de log por tipo de situación: INFO, WARN y ERROR**
@@ -1058,5 +1149,5 @@ Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las
 
 **T67. Lo que no se loguea, y por qué**
 - **Los 400:** los handlers de formato (`@Valid`, parámetro o header faltante, tipo inválido, JSON ilegible) responden directo, sin pasar por `error(...)`, así que no dejan línea en el log. Es aceptable: un 400 es un error del cliente que ya recibe el detalle en la respuesta.
-- **El gateway:** no le agregamos logs propios. Un 401 o un 403 no aparecen en ninguna terminal; se ven en la respuesta. Los pedidos que pasan sí dejan su rastro en el microservicio al que llegan.
+- **El gateway:** solo loguea cuando un microservicio no responde (`WARN ... ServicioCaidoFilter : 503 /api/espacios no responde: ...`). Un 401 o un 403 no aparecen en ninguna terminal; se ven en la respuesta. Los pedidos que pasan sí dejan su rastro en el microservicio al que llegan.
 - **Datos sensibles:** nunca se loguean tokens ni contraseñas.

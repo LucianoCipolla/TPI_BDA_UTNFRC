@@ -4,6 +4,13 @@ server:
 spring:
   application:
     name: api-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          httpclient:
+            # Máximo para conectar con un microservicio (ms); sin esto Netty espera 30 s (T70)
+            connect-timeout: 2000
   security:
     oauth2:
       resourceserver:
