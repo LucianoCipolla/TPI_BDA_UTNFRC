@@ -9,8 +9,10 @@ import org.springframework.web.client.RestClientException;
 
 import ar.edu.utn.frc.bda.campus.commons.ServicioNoDisponibleException;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 /** Consulta a Open-Meteo la probabilidad de lluvia (RN4). Si falla, lanza 503. */
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class OpenMeteoClient {
@@ -33,11 +35,13 @@ public class OpenMeteoClient {
                     .retrieve()
                     .body(OpenMeteoResponse.class);
         } catch (RestClientException ex) {               // no conecta, timeout o error HTTP
+            log.warn("Open-Meteo no respondió para ({}, {}): {}", lat, lon, ex.getMessage());
             throw new ServicioNoDisponibleException("No se pudo consultar el pronóstico del clima");
         }
 
         if (r == null || r.hourly() == null || r.hourly().time() == null || r.hourly().lluvia() == null
                 || r.hourly().time().size() != r.hourly().lluvia().size()) {
+            log.warn("Open-Meteo devolvió una respuesta incompleta para ({}, {})", lat, lon);
             throw new ServicioNoDisponibleException("Respuesta inesperada del servicio de clima");
         }
 
