@@ -118,6 +118,8 @@ Están listos cuando en el log aparece `Started MsEspaciosApplication` / `Starte
 
 > El gateway no necesita que Keycloak esté arriba para arrancar: baja las claves públicas recién cuando llega el primer pedido con token.
 
+> **Dejá las terminales de ms-espacios y ms-reservas a la vista durante la demo:** cada reserva creada, cada regla que rechaza un pedido y cada falla de una dependencia deja una línea de log ahí. Qué buscar está en la sección 6.11.
+
 Al arrancar por primera vez, ms-espacios carga 5 espacios de prueba (`DatosIniciales`):
 
 | id | Nombre | Tipo | Capacidad | Horario | Equipamiento | Actividades |
@@ -581,6 +583,13 @@ pedir "$RES/api/reservas/disponibilidad?inicio=${DIA}T10:00:00&fin=${DIA}T11:00:
 pedir $RES/api/reservas/mias -H "X-Usuario: usuario1"
 ```
 
+**Mirá la terminal de ms-reservas:** por cada `503` aparecen dos líneas `WARN`. La primera dice qué falló de verdad (lo que el usuario no ve) y la segunda, qué se le respondió:
+
+```
+WARN ... EspaciosClient         : ms-espacios no respondió al validar el espacio 2: I/O error on GET request for "http://localhost:8081/api/espacios/2/validacion": Connection refused: getsockopt
+WARN ... GlobalExceptionHandler : 503 El servicio de espacios no está disponible
+```
+
 Después volvé a levantar ms-espacios (`./mvnw spring-boot:run` en la Terminal 1).
 
 ### 6.10. Seguridad: todo por el gateway
@@ -708,6 +717,54 @@ Qué señalar en la presentación:
 - **401 vs. 403:** sin token o con un token inválido, 401; con un token válido pero sin el rol, 403. Los dos los decide el gateway, antes de rutear, y salen sin cuerpo.
 - **El 403 de RN7 es distinto:** ese sí tiene el `ApiResponse` con el mensaje, porque lo da ms-reservas.
 - **Token vencido:** si esperás más de 5 minutos y repetís cualquier pedido con el mismo token, da `401`.
+
+### 6.11. Logs: qué mirar en cada terminal
+
+Mientras corrés la demo, las terminales de los servicios muestran qué pasó con cada pedido. Todas las líneas tienen el mismo formato: fecha y hora, **nivel**, `[servicio]`, la clase que escribió y el mensaje.
+
+```
+2026-11-04T09:22:40.881-03:00  INFO 8928 --- [ms-reservas] [nio-8082-exec-6] a.e.u.f.b.c.r.services.ReservaService    : Reserva 1 creada por usuario1: espacio 1 (Aula 101), 2026-11-06T10:00 a 2026-11-06T12:00, CONFIRMADA
+```
+
+| Qué hiciste en la demo | Terminal | Qué aparece |
+|---|---|---|
+| Crear una reserva (6.5) | ms-reservas | `INFO ... Reserva 1 creada por usuario1: espacio 1 (Aula 101), ..., CONFIRMADA` |
+| Aprobar, rechazar o cancelar (6.7) | ms-reservas | `INFO ... Reserva 2 aprobada por bedelía` · `Reserva 4 rechazada por bedelía` · `Reserva 1 cancelada por usuario1` |
+| Romper una regla (6.6) | ms-reservas | `INFO ... GlobalExceptionHandler : 422 Las salas se reservan por un máximo de 2 horas` (o `409 El espacio ya está reservado en esa franja`, `404 No existe el espacio 99`…) |
+| Cancelar una reserva ajena (6.7 y 6.10) | ms-reservas | `INFO ... 403 La reserva no es tuya` |
+| Aprobar dos veces (6.7) | ms-reservas | `INFO ... 409 Una reserva CONFIRMADA no puede pasar a CONFIRMADA` |
+| Horario al revés o espacio inexistente (6.2) | ms-espacios | `INFO ... 422 La hora de apertura debe ser anterior a la de cierre` · `404 No existe el espacio 99` |
+| ms-espacios caído (6.9) | ms-reservas | `WARN ... ms-espacios no respondió ...` y `WARN ... 503 El servicio de espacios no está disponible` |
+| Open-Meteo caído (ver abajo) | ms-espacios | `WARN ... Open-Meteo no respondió para (-31.44, -64.19): ...` y, en una búsqueda, `WARN ... Se omite 'Cancha de fútbol' de la búsqueda: ...` |
+| Choque por concurrencia (6.8) | ms-reservas | `INFO ... 409 El espacio ya está reservado en esa franja`, o `INFO ... 409 choque de concurrencia: ObjectOptimisticLockingFailureException` si los dos pedidos pasaron la cadena a la vez |
+
+Qué significa cada nivel:
+
+- **INFO:** el sistema funcionando normalmente, incluso cuando rechaza un pedido por una regla.
+- **WARN:** falló algo de lo que dependemos (ms-espacios u Open-Meteo). El usuario recibió un `503` claro.
+- **ERROR:** un bug nuestro (el usuario recibió `500`), con el stack trace completo debajo. En la demo no tiene que aparecer ninguno.
+
+Lo que **no** deja log: los `400` (formato inválido, falta `X-Usuario`) y los `401`/`403` del gateway. Esos se ven solo en la respuesta.
+
+**Ver solo las fallas.** Para que la consola muestre únicamente los `WARN` y `ERROR` de nuestro código, levantá el servicio con `LOG_LEVEL=WARN` (los logs de arranque de Spring no cambian):
+
+```bash
+cd ms-reservas && LOG_LEVEL=WARN ./mvnw spring-boot:run
+```
+
+> `LOG_LEVEL=DEBUG` no muestra nada extra: hoy nuestro código no tiene logs de nivel DEBUG.
+
+**Probar la falla de Open-Meteo.** Reiniciá ms-espacios apuntando a una URL que no responde y buscá disponibles para un deporte:
+
+```bash
+cd ms-espacios && OPEN_METEO_URL=http://localhost:9 ./mvnw spring-boot:run
+```
+
+```bash
+pedir "$RES/api/reservas/disponibilidad?inicio=${DIA}T10:00:00&fin=${DIA}T11:00:00&asistentes=10&actividad=DEPORTE"
+```
+
+La búsqueda responde `200` sin la cancha, y en la terminal de ms-espacios aparecen los dos `WARN` (*"Open-Meteo no respondió..."* y *"Se omite 'Cancha de fútbol' de la búsqueda..."*). Después volvé a levantar ms-espacios normalmente.
 
 ---
 
