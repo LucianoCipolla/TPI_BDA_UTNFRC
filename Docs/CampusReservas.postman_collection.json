@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "CampusReservas",
-    "description": "TPI Backend de Aplicaciones 2026 · UTN FRC.\n\nTodos los pedidos entran por el API Gateway ({{gateway}}) con el JWT de Keycloak.\n\n1. Levantá el sistema: `sh build.sh` y `docker compose up -d --build`.\n2. Se puede correr con la base vacía o con datos: cada pedido guarda los ids que crea, y al final se cancelan las reservas que quedaron activas, así se puede repetir.\n3. Elegí el environment **CampusReservas (Docker)**.\n4. Corré las carpetas 0 a 7 en orden (o la colección entera con el Runner, sin la carpeta 8).\n\nLos tokens se piden en la carpeta 0 y se renuevan solos cuando vencen. Las fechas ({{dia}}, {{sabado}}, ...) se calculan antes de cada pedido.\n\nLa concurrencia (RN15) no se puede mostrar desde Postman, porque manda los pedidos de a uno: está en la sección 3.6 de Docs/guia-pruebas.md.",
+    "description": "TPI Backend de Aplicaciones 2026 · UTN FRC.\n\nTodos los pedidos entran por el API Gateway ({{gateway}}) con el JWT de Keycloak.\n\n1. Levantá el sistema: `sh build.sh` y `docker compose up -d --build`.\n2. Se puede correr con la base vacía o con datos: cada pedido guarda los ids que crea, y al final se cancelan las reservas que quedaron activas, así se puede repetir.\n3. Elegí el environment **CampusReservas (Docker)**.\n4. Corré las carpetas 0 a 7 en orden (o la colección entera con el Runner, sin la carpeta 8).\n\nLos tokens se piden en la carpeta 0 y se renuevan solos cuando vencen. Las fechas ({{dia}}, {{sabado}}, ...) se calculan antes de cada pedido.\n\nLa concurrencia (RN15) no se puede mostrar desde Postman, porque manda los pedidos de a uno.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "event": [
@@ -75,7 +75,13 @@
                   "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
                   "const t = pm.response.json();",
                   "pm.environment.set(\"token_usuario1\", t.access_token);",
-                  "pm.environment.set(\"vence_usuario1\", Date.now() + (t.expires_in - 30) * 1000);"
+                  "pm.environment.set(\"vence_usuario1\", Date.now() + (t.expires_in - 30) * 1000);",
+                  "// El payload del JWT (la parte del medio, en base64url)",
+                  "const b64 = t.access_token.split(\".\")[1].replace(/-/g, \"+\").replace(/_/g, \"/\");",
+                  "const jwt = JSON.parse(atob(b64 + \"=\".repeat((4 - b64.length % 4) % 4)));",
+                  "pm.test(\"preferred_username = usuario1\", () => pm.expect(jwt.preferred_username).to.eql(\"usuario1\"));",
+                  "pm.test(\"Rol USUARIO en realm_access.roles\", () => pm.expect(jwt.realm_access.roles).to.include(\"USUARIO\"));",
+                  "pm.test(\"Dura 5 minutos (exp − iat = 300)\", () => pm.expect(jwt.exp - jwt.iat).to.eql(300));"
                 ]
               }
             }
@@ -683,7 +689,9 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const ids = pm.response.json().responseValue.map(e => e.id);",
+                  "pm.test(\"Aparecen el Aula 101 (1) y el Laboratorio 3 (3)\", () => pm.expect(ids).to.include.members([1, 3]));"
                 ]
               }
             }
@@ -844,6 +852,38 @@
               }
             },
             "description": "201 si no se pronostica lluvia; 422 si se pronostica más de 60 % (RN4); 503 si no hay internet."
+          }
+        },
+        {
+          "name": "Buscar disponibles de nuevo → ya no aparece el Aula 101",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const ids = pm.response.json().responseValue.map(e => e.id);",
+                  "pm.test(\"Ya no aparece el Aula 101, sí el Laboratorio 3\", () => { pm.expect(ids).to.not.include(1); pm.expect(ids).to.include(3); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gateway}}/api/reservas/disponibilidad?inicio={{dia}}T10:00:00&fin={{dia}}T12:00:00&asistentes=20&actividad=CLASE&equipamiento=PROYECTOR",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_usuario1}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "La misma búsqueda de la carpeta 3: la clase de usuario1 ocupa el Aula 101 de 10 a 12, así que ya no está entre los disponibles (el Laboratorio 3 sigue)."
           }
         }
       ]

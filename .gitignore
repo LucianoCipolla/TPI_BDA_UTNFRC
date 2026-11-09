@@ -17,3 +17,14 @@ data/
 *.log
 Thumbs.db
 .DS_Store
+# ===== Documentos del equipo =====
+# De Docs/ solo se suben la Entrega 1, los diagramas y las colecciones de Postman.
+# El resto (defensa, guía de pruebas, plan, etc.) queda solo en la compu de cada uno.
+Docs/*
+!Docs/TPI-CampusReservas-Entrega-1-1.docx
+!Docs/diagramas/
+!Docs/*.postman_collection.json
+!Docs/*.postman_environment.json
+
+# Archivos temporales que crea Word mientras un documento está abierto
+~$*

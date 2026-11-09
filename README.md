@@ -186,7 +186,8 @@ Si una dependencia falla, el sistema responde **503** ("ahora no puedo, reintent
 | Java (JDK) | 25 | Compilar los JAR (las imágenes de Docker no compilan: copian el JAR) |
 | Maven | 3.9 o más | Instalar `campus-commons` en el repositorio local |
 | Docker Desktop | reciente | Correr todo el sistema |
-| Git Bash (en Windows) | viene con Git | Correr `build.sh` y los comandos de prueba |
+| Git Bash (en Windows) | viene con Git | Correr `build.sh` |
+| Postman | reciente | Correr la demo |
 
 ### 1. Compilar
 
@@ -210,12 +211,7 @@ En PowerShell, `sh` no existe; se llama al bash de Git:
 docker compose up -d --build
 ```
 
-Levanta cuatro contenedores: `keycloak`, `ms-espacios`, `ms-reservas` y `api-gateway`. Keycloak tarda entre 20 y 40 segundos en arrancar y los servicios Spring entre 10 y 20. Está todo listo cuando:
-
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8180/realms/campus   # 200
-docker compose logs ms-espacios ms-reservas api-gateway | grep Started        # tres líneas
-```
+Levanta cuatro contenedores: `keycloak`, `ms-espacios`, `ms-reservas` y `api-gateway`. Keycloak tarda entre 20 y 40 segundos en arrancar y los servicios Spring entre 10 y 20. Conviene esperar unos 40 segundos antes de empezar la demo: si recién levantado algún pedido da 503 o 401, es que todavía están arrancando.
 
 | Puerto | Qué |
 |---|---|
@@ -236,19 +232,38 @@ Vienen en `keycloak/realm-campus.json`, que Keycloak importa al arrancar. La con
 
 ms-espacios arranca con 5 espacios de prueba: Aula 101, Aula 102, Laboratorio 3, Sala de reuniones y Cancha de fútbol.
 
-### 4. Probarlo
+### 4. La demo, en Postman
 
-Se pide un token a Keycloak y se lo manda al gateway en `Authorization: Bearer`. El token dura 5 minutos.
+Toda la demo se hace desde Postman. Cada pedido pasa por el gateway con el JWT de Keycloak. Los tokens se piden y se renuevan solos (duran 5 minutos) y las fechas de las reservas se calculan solas, así que no hay que copiar nada a mano.
 
-```bash
-TOKEN=$(curl -s -X POST http://localhost:8180/realms/campus/protocol/openid-connect/token \
-  -d grant_type=password -d client_id=campus-api -d username=usuario1 -d password=usuario1 \
-  | sed -E 's/.*"access_token":"([^"]+)".*/\1/')
+**Importar.** En Postman, **Import** → los tres archivos de `Docs/`:
 
-curl -s http://localhost:8080/api/espacios -H "Authorization: Bearer $TOKEN"
-```
+- `CampusReservas-simple.postman_collection.json`: la demo simple.
+- `CampusReservas.postman_collection.json`: la demo completa.
+- `CampusReservas.postman_environment.json`: el environment de la demo completa.
 
-El recorrido completo de la demo, con un comando por cada regla de negocio, está en la [guía de pruebas](Docs/guia-pruebas.md). Los mismos pedidos, con un test cada uno, están en la **colección de Postman** (`Docs/CampusReservas.postman_collection.json`, con su environment `Docs/CampusReservas.postman_environment.json`): se importan los dos, se elige el environment *CampusReservas (Docker)* y se corre con el Runner.
+**Demo simple: *CampusReservas (demo simple)*.** usuario1 reserva y admin1 aprueba el evento. No necesita environment. Se corre entera con clic derecho → **Run collection** → **Run** (30 tests), o pedido por pedido con **Send**. Cada pedido dice en su descripción qué tiene que responder.
+
+| # | Quién | Qué hace | Responde |
+|---|---|---|---|
+| 1-2 | — | Login de usuario1 y de admin1 | 200 |
+| 3-5 | usuario1 | Ve los espacios, el Aula 101 y busca dónde dar una clase | 200 |
+| 6 | usuario1 | Reserva una clase en el Aula 101 | 201 `CONFIRMADA` |
+| 7 | usuario1 | La misma franja otra vez (RN6) | 409 |
+| 8 | usuario1 | 50 personas en un aula para 40 (RN5) | 422 |
+| 9 | usuario1 | Una reserva de 15 minutos (RN2) | 422 |
+| 10 | usuario1 | Pide un evento (RN13) | 201 `PENDIENTE` |
+| 11 | admin1 | Ve los eventos pendientes | 200 |
+| 12 | admin1 | Aprueba el evento | 200 `CONFIRMADA` |
+| 13 | usuario1 | Ve sus reservas | 200 |
+| 14-15 | usuario1 | Cancela la clase y el evento | 200 `CANCELADA` |
+| 16 | — | Pide algo sin token | 401 |
+
+Como al final cancela todo, se puede correr las veces que haga falta.
+
+**Demo completa: *CampusReservas*.** Arriba a la derecha hay que elegir el environment **CampusReservas (Docker)**. Recorre cada regla de negocio, los estados de una reserva y la seguridad del gateway, con los tres usuarios. Se corre con **Run collection**, destildando la carpeta 8: 73 tests.
+
+La carpeta 8 (resiliencia) prueba qué pasa si se cae ms-espacios y se corre aparte: antes, `docker compose stop ms-espacios`; después, `docker compose start ms-espacios`.
 
 ### 5. Apagar
 
@@ -259,7 +274,7 @@ docker compose down    # apaga y borra los contenedores: la próxima vez arranca
 
 Las bases H2 viven dentro de cada contenedor, así que `down` deja el sistema como recién instalado.
 
-> **Modo local (para desarrollar):** se puede dejar solo Keycloak en Docker (`docker compose up -d keycloak`) y correr cada servicio desde el IDE o con `./mvnw spring-boot:run`. En ese modo los microservicios sí publican sus puertos y tienen Swagger en `http://localhost:8081/swagger-ui.html` y `http://localhost:8082/swagger-ui.html`. Detalles en la sección 6 de la [guía de pruebas](Docs/guia-pruebas.md).
+> **Modo local (para desarrollar):** se puede dejar solo Keycloak en Docker (`docker compose up -d keycloak`) y correr cada servicio desde el IDE o con `./mvnw spring-boot:run`. En ese modo los microservicios sí publican sus puertos y tienen Swagger en `http://localhost:8081/swagger-ui.html` y `http://localhost:8082/swagger-ui.html`.
 
 ---
 
@@ -293,7 +308,7 @@ Open-Meteo es la API pública de clima que usamos para la regla RN4 (no se reser
 - **Buscar disponibles** → **200**, pero **sin las canchas**: se omiten de la búsqueda y el resto de los espacios aparece normalmente.
 - **Aulas, laboratorios y salas** → funcionan igual que siempre, porque no dependen del clima.
 
-Cada falla queda en el log de ms-espacios con nivel `WARN`, con el error real de la conexión. Para probarlo se levanta ms-espacios con `OPEN_METEO_URL` apuntando a una dirección que no responde (sección 6 de la [guía de pruebas](Docs/guia-pruebas.md)).
+Cada falla queda en el log de ms-espacios con nivel `WARN`, con el error real de la conexión.
 
 ---
 
@@ -307,7 +322,7 @@ Cada falla queda en el log de ms-espacios con nivel `WARN`, con el error real de
 ├── api-gateway/           # Gateway y seguridad (puerto 8080)
 ├── keycloak/
 │   └── realm-campus.json  # Realm importado al arrancar Keycloak
-├── Docs/                  # Documentación del proyecto (ver abajo)
+├── Docs/                  # Colecciones de Postman y diagramas (ver abajo)
 ├── build.sh               # Compila los cuatro proyectos en orden
 └── docker-compose.yml     # Levanta Keycloak, los dos microservicios y el gateway
 ```
@@ -316,14 +331,11 @@ Cada aplicación tiene su `Dockerfile`, que copia el JAR que deja `build.sh` en 
 
 ---
 
-## Documentación
+## Postman y diagramas
 
 | Archivo | Qué tiene |
 |---|---|
-| [`Docs/guia-pruebas.md`](Docs/guia-pruebas.md) | Cómo levantarlo y el guion de la demo: un comando por cada regla, estado, caso de seguridad y falla |
-| [`Docs/CampusReservas.postman_collection.json`](Docs/CampusReservas.postman_collection.json) y [`environment`](Docs/CampusReservas.postman_environment.json) | Colección de Postman: login por usuario y 62 pedidos con su test, por el gateway |
-| [`Docs/defensa.md`](Docs/defensa.md) | Explicación de cada archivo y cada decisión del equipo (T1 en adelante), para la presentación |
-| [`Docs/TPI-CampusReservas-Entrega-1-1.docx`](Docs/TPI-CampusReservas-Entrega-1-1.docx) | Entrega 1: propuesta, reglas de negocio y diagramas C1 y C2 |
-| [`Docs/diagramas/c1-contexto.png`](Docs/diagramas/c1-contexto.png) | Diagrama de contexto (C1) actualizado |
-| [`Docs/diagramas/c2-contenedores.png`](Docs/diagramas/c2-contenedores.png) | Diagrama de contenedores (C2) actualizado, con su fuente en SVG |
-| [`Docs/TPI-CampusReservas-Plan-de-desarrollo.docx`](Docs/TPI-CampusReservas-Plan-de-desarrollo.docx) | Plan de desarrollo por fases, con el código de referencia de cada parte |
+| [`Docs/CampusReservas-simple.postman_collection.json`](Docs/CampusReservas-simple.postman_collection.json) | Demo simple: usuario1 reserva y admin1 aprueba el evento. 16 pedidos, sin environment |
+| [`Docs/CampusReservas.postman_collection.json`](Docs/CampusReservas.postman_collection.json) y [`environment`](Docs/CampusReservas.postman_environment.json) | Demo completa: cada regla, estado y caso de seguridad. 63 pedidos con su test |
+| [`Docs/diagramas/c1-contexto.png`](Docs/diagramas/c1-contexto.png) | Diagrama de contexto (C1) |
+| [`Docs/diagramas/c2-contenedores.png`](Docs/diagramas/c2-contenedores.png) | Diagrama de contenedores (C2), con su fuente en SVG |
