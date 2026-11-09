@@ -86,11 +86,12 @@ stateDiagram-v2
     PENDIENTE --> RECHAZADA: ADMIN rechaza
     PENDIENTE --> CANCELADA: dueño cancela (antes del inicio)
     CONFIRMADA --> CANCELADA: dueño cancela (antes del inicio)
+    CONFIRMADA --> [*]: pasa el horario de la reserva
     RECHAZADA --> [*]
     CANCELADA --> [*]
 ```
 
-`PENDIENTE` y `CONFIRMADA` ocupan el espacio; `RECHAZADA` y `CANCELADA` lo liberan.
+`PENDIENTE` y `CONFIRMADA` ocupan el espacio; `RECHAZADA` y `CANCELADA` lo liberan. Una reserva confirmada que se usa termina siendo `CONFIRMADA`: no hay un estado `FINALIZADA`, porque haría falta una tarea programada que cambie el estado cuando pasa el horario. Una vez que empieza, la reserva ya no se puede cancelar, así que queda cerrada.
 
 ---
 
