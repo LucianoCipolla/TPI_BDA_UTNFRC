@@ -109,6 +109,35 @@ Ideas clave por si repreguntan:
 - **Por qué el `pom.xml` también tiene `spring-context`:** `MethodArgumentNotValidException` está en `spring-web`, pero hereda de `BindException` y devuelve un `BindingResult`, que están en `spring-context` (paquete `org.springframework.validation`). `spring-web` no trae `spring-context`, así que sin esa dependencia no compila ("cannot access org.springframework.validation.BindException"). Va `provided` por el mismo motivo que `spring-web`: los microservicios ya lo tienen.
 - **Excepciones no previstas (500):** si salta una que no tiene handler (por ejemplo, un `NullPointerException`), Spring responde 500 con su formato por defecto. No la atrapamos a propósito: un 500 indica un bug que hay que corregir, no un error de negocio.
 
+**Sección 09 de la entrega: librería común**
+
+> "Sí, tenemos una librería común: `campus-commons`. Su propósito es que todas las APIs respondan y fallen igual, sin repetir ese código en cada servicio. Solo compartimos lo transversal, lo que no depende del negocio: el formato de respuesta y el manejo de errores. El dominio queda dentro de cada microservicio, para que un cambio en uno no obligue a recompilar y desplegar el otro (D13)."
+
+- **Nombre y coordenadas:** `campus-commons`, `ar.edu.utn.frc.bda:campus-commons:1.0.0`. Es un JAR librería: sin `main`, no se ejecuta solo.
+- **Servicios que la usan:** `ms-espacios` y `ms-reservas`. El gateway no: es reactivo, y el `GlobalExceptionHandler` es de Spring MVC (T63).
+- **Distribución:** `mvn install` la deja en el repositorio local `.m2`, y cada servicio la declara en su `pom.xml`. Queda empaquetada dentro del JAR ejecutable de cada uno: se comparte al compilar, no al desplegar. `build.sh` la compila primero (previsto para la Fase 4).
+- **Cómo la encuentra Spring:** `scanBasePackages = "ar.edu.utn.frc.bda.campus"` en cada servicio, porque el handler está en otro paquete.
+
+| Componente | Para qué | Por qué es reutilizable |
+|---|---|---|
+| `ApiResponse<T>` | Formato único de respuesta | Es genérico: no conoce ningún dato del negocio. `ms-reservas` lo usa además para leer las respuestas de `ms-espacios` |
+| `RecursoNoEncontradoException` (404), `AccesoDenegadoException` (403), `ConflictoException` (409), `ReglaNegocioException` (422), `ServicioNoDisponibleException` (503) | Las situaciones de error | Nombran categorías de error, no reglas: el mensaje concreto lo pone cada servicio |
+| `GlobalExceptionHandler` | Traduce excepciones a código HTTP y `ApiResponse`, incluidos los 400 de formato | La traducción es la misma en todos los servicios |
+
+| Queda en cada microservicio | Por qué no va en la librería |
+|---|---|
+| Entidades y repositorios | Cada servicio es dueño de sus datos (D9) |
+| DTOs (`EspacioDto`, `ReservaDto`…) | Son el contrato de cada API. `ms-reservas` define sus propios records, `ValidacionEspacio` y `EspacioDisponible`, para leer las respuestas de `ms-espacios`: ningún servicio importa clases del otro |
+| `TipoActividad` | Es dominio. Se repite a propósito: viaja como texto, y alcanza con que los valores coincidan (D13) |
+| Reglas de negocio, Strategy, Template Method y la cadena de validaciones | Son el motivo de ser de cada servicio |
+| `ConcurrenciaExceptionHandler` | Solo `ms-reservas` usa bloqueo optimista (`@Version`, RN15): `ms-espacios` no tiene esa situación. Además, su mensaje habla de espacios y reservas, y en el JAR obligaría a sumar `spring-tx` como dependencia |
+| `RestClientConfig` | Casi igual en los dos, pero cada uno apunta a otra dependencia y sus timeouts deben poder ser distintos (ver T62). Son pocas líneas: una abstracción costaría más que la repetición |
+| `application.yaml` y `DatosIniciales` | Son la configuración y los datos de cada servicio |
+
+- **Si preguntan por las excepciones que un servicio no usa:** hoy `AccesoDenegadoException` y `ConflictoException` solo las lanza `ms-reservas`. Igual van en el JAR, porque el `GlobalExceptionHandler` tiene que conocerlas para traducirlas, y así la tabla completa de excepción a código HTTP queda en un solo lugar.
+- **El criterio:** va al JAR lo que es igual en todos los servicios **y** cambia sin importar el negocio. Si dos clases se parecen pero pueden cambiar por motivos distintos, se duplican: es preferible un poco de duplicación a acoplar los servicios.
+- **El costo que aceptamos:** la librería usa las mismas versiones de Spring que los servicios (T2), y si cambia hay que reinstalarla y recompilar los dos. Por eso la mantenemos chica: siete clases y sin dependencias que viajen con el JAR (todas `provided`).
+
 ---
 
 ## Fase 0: Keycloak
@@ -180,7 +209,7 @@ Ideas clave por si repreguntan:
 - **Anotaciones de JPA (`jakarta.persistence`):** son el estándar. Hibernate es la implementación que las lee y genera el SQL.
 - **`IDENTITY`:** la columna `id` es autoincremental en la base; el id se conoce recién al insertar.
 - **`EnumType.STRING` vs. `ORDINAL`:** con `ORDINAL` se guarda la posición (0, 1, 2…). Si alguien reordena o inserta un valor en el medio del enum, todos los datos viejos pasan a significar otra cosa. Con `STRING` se guarda `"AULA"`.
-- **`@JdbcTypeCode(SqlTypes.VARCHAR)`:** con H2, Hibernate 7 crea las columnas de enums como tipo `ENUM('AULA', ...)` de la base, con la lista fija. Con `ddl-auto: update` esa lista no se actualiza, así que agregar un tipo nuevo (un auditorio) fallaría al insertar. Forzamos `VARCHAR` para que agregar un valor al enum de Java alcance, que es justamente el argumento del patrón Strategy.
+- **`@JdbcTypeCode(SqlTypes.VARCHAR)`:** con H2, Hibernate 7 crea las columnas de enums como tipo `ENUM('AULA', ...)` de la base, con la lista fija. Con `ddl-auto: update` esa lista no se actualiza, así que agregar un tipo nuevo (un auditorio) fallaría al insertar. Forzamos `VARCHAR` para que la columna sea texto común. Ojo: Hibernate igual agrega un `CHECK` con los valores del enum, así que en una base existente también hay que tratar esa restricción (T68).
 - **`@ElementCollection`:** para colecciones de valores simples (enums, strings) que no tienen identidad propia. Alternativa descartada: una entidad `Equipamiento` con `@ManyToMany`, que sería más tablas y un ABM sin valor para el TP.
 - **`FetchType.EAGER`:** trae los conjuntos junto con el espacio. Con `open-in-view: false` y sin transacción en el controller, una colección `LAZY` daría `LazyInitializationException` al convertirla a DTO. Son conjuntos chicos, así que el costo es mínimo.
 - **`Set` y no `List`:** un espacio no puede tener dos veces el mismo equipamiento.
@@ -372,11 +401,11 @@ Ideas clave por si repreguntan:
 - **`usuario` es un `String`:** el `preferred_username` del token (por ejemplo `usuario1`). No hay tabla de usuarios: los usuarios los maneja Keycloak.
 - **`LocalDateTime`:** fecha y hora de inicio y de fin, sin zona horaria, en hora local.
 - **`@Version Long version`:** JPA guarda un número de versión por fila. Al hacer `UPDATE ... WHERE id = ? AND version = ?`, incrementa la versión. Si otro la cambió antes, el `WHERE` no encuentra la fila, y JPA lanza `OptimisticLockException` → 409.
-- **Enums como `VARCHAR`:** mismo motivo que T18. Si se agrega un estado, la base lo acepta sin migrar la columna.
+- **Enums como `VARCHAR`:** mismo motivo que T18. Si se agrega un estado, no hay que cambiar el tipo de la columna, pero sí el `CHECK` que crea Hibernate (T68).
 
 **La entidad `AgendaEspacio`**
 
-> "Es una tabla con una fila por espacio y un campo `@Version`, que existe solo para la concurrencia (RN15). Dos pedidos que reservan el mismo espacio al mismo tiempo crean dos reservas **nuevas y distintas**, así que no chocan entre sí: el `@Version` de `Reserva` no las detecta. Por eso cada reserva nueva incrementa también la versión de la fila de agenda de su espacio, dentro de la misma transacción. Si dos transacciones parten de la misma versión, la segunda falla al hacer commit, se deshace y recibe 409. La agenda es el punto en común donde los dos pedidos tienen que chocar."
+> "Es una tabla con una fila por espacio y un campo `@Version`, que existe solo para la concurrencia (RN15). Dos pedidos que reservan el mismo espacio al mismo tiempo crean dos reservas **nuevas y distintas**, así que no chocan entre sí: el `@Version` de `Reserva` no las detecta. Por eso cada reserva nueva incrementa también la versión de la fila de agenda de su espacio, dentro de la misma transacción. Si dos transacciones parten de la misma versión, la segunda falla al hacer commit, se deshace y recibe 409. La primera reserva de un espacio es distinta: crea la fila, no incrementa nada, y si dos la crean a la vez, la segunda viola la clave primaria y también recibe 409. La agenda es el punto en común donde los dos pedidos tienen que chocar."
 
 Ideas clave por si repreguntan:
 
@@ -512,7 +541,858 @@ Ideas clave por si repreguntan:
 - **Por qué Spring las traduce:** cada base y cada proveedor de JPA tiene sus propias excepciones y códigos de error. Spring las convierte a una jerarquía común, así el código no depende de H2 ni de Hibernate.
 - **Optimista no espera, la clave primaria sí:** con la versión, nadie se bloquea; el choque se detecta al final. Con el `INSERT` repetido, H2 hace esperar al segundo hasta que el primero confirma, y recién ahí lo rechaza.
 - **Las dos son `RuntimeException`:** por eso hacen rollback de la transacción, y la reserva del perdedor no queda guardada.
-- **"Transitoria" vs. "no transitoria":** Spring clasifica el choque de versiones como transitorio (si reintentás, puede funcionar) y la violación de integridad como no transitoria (el mismo `INSERT` va a fallar siempre). En nuestro caso las dos se resuelven reintentando, porque el reintento ya no es el mismo pedido: la fila de agenda ya existe.
+- **"Transitoria" vs. "no transitoria" (detalle):** Spring clasifica el choque de versiones como transitorio (si reintentás, puede funcionar) y la violación de integridad como no transitoria (el mismo `INSERT` va a fallar siempre). En nuestro caso las dos se resuelven reintentando, porque el reintento ya no es el mismo pedido: la fila de agenda ya existe.
+
+---
+
+## Fase 3: Gateway y seguridad
+
+**Qué es el API Gateway y por qué existe**
+
+> "Es el único punto de entrada al backend: el cliente solo conoce `http://localhost:8080`. El gateway recibe cada pedido, verifica el token y el rol, y lo reenvía al microservicio que corresponde según la ruta: `/api/espacios/**` a ms-espacios y `/api/reservas/**` a ms-reservas. Así la seguridad está en un solo lugar, el cliente no conoce la topología interna, y los servicios pueden moverse o cambiar de puerto sin que el cliente se entere (D5). Usamos Spring Cloud Gateway, que es reactivo: corre sobre Netty con WebFlux, no sobre Tomcat."
+
+Ideas clave por si repreguntan:
+
+- **Dependencias:** solo dos, desde Initializr: Reactive Gateway y OAuth2 Resource Server. No usa JPA, ni base, ni el JAR común.
+- **Reactivo (WebFlux):** atiende muchas conexiones con pocos hilos, sin bloquearse mientras espera la respuesta del microservicio. Es lo natural para un proxy que pasa la mayor parte del tiempo esperando. Por eso aparecen `Mono` y `ServerWebExchange` en vez de `HttpServletRequest`.
+- **`Mono<T>`:** "un valor que va a estar disponible más adelante" (o ninguno). El código describe qué hacer cuando llegue, sin esperar parado.
+- **Spring Cloud:** un conjunto de proyectos para sistemas distribuidos, con su propia numeración de versiones (2025.1.4) compatible con Boot 4.1. Se importa como BOM en `dependencyManagement`, igual que hicimos con Boot en campus-commons.
+
+**Las rutas (`GatewayConfig`)**
+
+> "Con un `RouteLocator` definimos dos rutas, como en el apunte 19: todo lo que empiece con `/api/espacios/` va a la URL de ms-espacios, y todo lo que empiece con `/api/reservas/` va a la de ms-reservas. Las URLs vienen de la configuración, con variables de entorno, así que en Docker apuntan a `http://ms-espacios:8081` y desde el IDE a `localhost`."
+
+- **`/**`:** cualquier cosa después, incluso nada: `/api/reservas` también coincide con `/api/reservas/**`.
+- **El gateway no cambia la ruta:** `GET /api/espacios/1` llega a ms-espacios como `GET /api/espacios/1`. Por eso los controllers tienen el mismo prefijo.
+- **Una ruta que no coincide con ninguna:** nunca llega a ningún servicio (y la seguridad la rechaza antes con `denyAll`).
+
+**La seguridad (`SecurityConfig`): autenticar y autorizar**
+
+> "El Security Filter es un `SecurityWebFilterChain` de Spring Security. Primero **autentica**: con `oauth2ResourceServer().jwt()`, verifica que el pedido traiga un JWT válido (firma de Keycloak, no vencido y emitido por nuestro realm); si no, 401. Después **autoriza**: con una regla por ruta y método, controla que el rol alcance; si no, 403. Las reglas: leer espacios, USUARIO o ADMIN; escribir espacios, solo ADMIN; listar todas las reservas y aprobar o rechazar, solo ADMIN; el resto de las operaciones de reservas, solo USUARIO; cualquier otra cosa, denegada."
+
+Ideas clave por si repreguntan:
+
+- **401 vs. 403:** 401 Unauthorized = "no sé quién sos" (sin token, token falso o vencido). 403 Forbidden = "sé quién sos, pero no podés hacer esto" (rol equivocado).
+- **Cómo verifica la firma:** baja las **claves públicas** de Keycloak (`jwk-set-uri`) y comprueba que el token fue firmado con la clave privada de Keycloak. Si alguien cambia un solo carácter del token, la firma no coincide → 401. Nunca necesita hablar con Keycloak por cada pedido: solo baja las claves una vez.
+- **También verifica:** `exp` (que no esté vencido) e `iss` (que lo haya emitido `http://localhost:8180/realms/campus`).
+- **Las reglas se evalúan en orden y gana la primera que coincide.** Por eso el `GET /api/espacios/**` va antes de la regla general de `/api/espacios/**`, y `denyAll()` va al final.
+- **`anyExchange().denyAll()`:** todo lo que no está permitido explícitamente está prohibido. Es más seguro que permitir por defecto.
+- **`hasRole("ADMIN")` busca la autoridad `ROLE_ADMIN`:** por convención, Spring antepone `ROLE_`.
+- **El convertidor de roles (`rolesDeKeycloak`):** Keycloak manda los roles en `realm_access.roles`, y Spring, por defecto, los busca en `scope`. El convertidor los lee de donde están y los transforma en `ROLE_USUARIO` o `ROLE_ADMIN`.
+- **`csrf().disable()`:** CSRF protege formularios de navegador que usan cookies de sesión. Nuestra API usa tokens en el header `Authorization`, que un sitio malicioso no puede adjuntar solo, así que no aplica.
+- **Por qué un ADMIN no puede crear reservas:** la regla de reservas es `hasRole("USUARIO")`. Bedelía administra; las reservas las hacen estudiantes y docentes (tabla de roles de la Entrega 1).
+- **Por qué los microservicios no validan el token:** están en la red interna y solo se llega a ellos por el gateway (trusted zone, D6). Validarlo también en cada uno sería defensa en profundidad, pero triplicaría la configuración.
+
+**El filtro `UsuarioHeaderFilter`: quién es el usuario**
+
+> "Es un `GlobalFilter`: se ejecuta en todos los pedidos que el gateway reenvía. Primero borra cualquier header `X-Usuario` que haya mandado el cliente, porque no se le puede creer. Después, si el pedido está autenticado, saca el `preferred_username` del token ya validado y lo pone en `X-Usuario`. ms-reservas lo usa para saber quién reserva y quién cancela (RN7). Lo probamos: usuario1 mandó `X-Usuario: usuario2` a mano y la reserva quedó a nombre de usuario1."
+
+- **Por qué borrar primero:** si el cliente manda `X-Usuario: usuario2` y el gateway solo agregara el suyo, podría haber dos valores, o el del cliente podría pasar en un pedido sin token.
+- **`exchange.mutate()`:** en WebFlux el pedido es inmutable; para cambiarlo se crea una copia modificada.
+- **`getPrincipal()`:** el usuario autenticado que dejó Spring Security. Si no hay (pedido sin token), `defaultIfEmpty` sigue con el pedido limpio.
+
+**Las dos URLs de Keycloak (`issuer-uri` y `jwk-set-uri`)**
+
+> "El token que pide Postman dice `iss: http://localhost:8180/realms/campus`, porque Postman habló con `localhost:8180`. Pero dentro de Docker, el gateway llega a Keycloak como `http://keycloak:8080`. Por eso separamos las dos cosas: `issuer-uri` queda fijo en `localhost:8180`, que es el emisor que el gateway exige dentro del token, y `jwk-set-uri`, de donde baja las claves públicas, se cambia por variable de entorno en Docker."
+
+**Timeouts y servicios caídos (`ServicioNoDisponibleFilter`)**
+
+> "Si un microservicio está apagado, el gateway no puede conectarse. Por defecto respondería 500, como si fuera un bug. Un filtro global atrapa ese error de conexión y responde 503 con el mismo formato `ApiResponse` que los servicios. Además configuramos timeouts: 2 segundos para conectar y 10 para recibir la respuesta. Si un servicio queda colgado, el gateway corta a los 10 segundos con 504 Gateway Timeout, en vez de dejar al cliente esperando para siempre."
+
+---
+
+## Recursos y endpoints por microservicio
+
+Sección 07 (Arquitectura: APIs). Las rutas son las de los controllers. La columna Seguridad es el diseño de la fase 3 (plan, sección 7.2): el rol lo controlaría el gateway, pero `api-gateway` no está en el repo, y los microservicios no tienen Spring Security. Hoy, en el código, solo se aplican la identidad por `X-Usuario` y el control de dueño de RN7.
+
+**ms-espacios**
+
+| Microservicio | Recurso | Método HTTP | Endpoint | Operación de negocio | Seguridad |
+|---|---|---|---|---|---|
+| ms-espacios | Espacios | GET | `/api/espacios` | Consultar el catálogo de espacios | USUARIO o ADMIN |
+| ms-espacios | Espacios | GET | `/api/espacios/{id}` | Consultar el detalle de un espacio | USUARIO o ADMIN |
+| ms-espacios | Espacios | POST | `/api/espacios` | Dar de alta un espacio en el catálogo | ADMIN |
+| ms-espacios | Espacios | PUT | `/api/espacios/{id}` | Actualizar los datos de un espacio | ADMIN |
+| ms-espacios | Espacios | DELETE | `/api/espacios/{id}` | Dar de baja un espacio del catálogo | ADMIN |
+| ms-espacios | Validación de franja | GET | `/api/espacios/{id}/validacion` | Verificar si un espacio se puede usar en una franja: horario, actividad, equipamiento, reglas de su tipo y clima, e informar el motivo si no sirve | USUARIO o ADMIN por el gateway; ms-reservas por la red interna, al crear una reserva |
+| ms-espacios | Espacios compatibles | GET | `/api/espacios/compatibles` | Obtener los espacios que cumplen capacidad, actividad, equipamiento, horario y clima para una franja | USUARIO o ADMIN por el gateway; ms-reservas por la red interna, al buscar disponibles |
+
+**ms-reservas**
+
+| Microservicio | Recurso | Método HTTP | Endpoint | Operación de negocio | Seguridad |
+|---|---|---|---|---|---|
+| ms-reservas | Reservas | POST | `/api/reservas` | Registrar una reserva a nombre del usuario del token: queda CONFIRMADA, o PENDIENTE si es un evento | USUARIO |
+| ms-reservas | Reservas | GET | `/api/reservas/mias` | Consultar las reservas propias | USUARIO (solo las propias, por `X-Usuario`) |
+| ms-reservas | Reservas | GET | `/api/reservas` | Consultar todas las reservas, con filtro opcional por estado | ADMIN |
+| ms-reservas | Reservas | PATCH | `/api/reservas/{id}/aprobar` | Aprobar un evento pendiente antes de su inicio, que pasa a CONFIRMADA | ADMIN |
+| ms-reservas | Reservas | PATCH | `/api/reservas/{id}/rechazar` | Rechazar un evento pendiente y liberar el espacio | ADMIN |
+| ms-reservas | Reservas | PATCH | `/api/reservas/{id}/cancelar` | Cancelar una reserva propia antes de su inicio y liberar el espacio | USUARIO (solo el dueño, RN7) |
+| ms-reservas | Disponibilidad | GET | `/api/reservas/disponibilidad` | Sugerir los espacios compatibles con el pedido que están libres en la franja | USUARIO |
+
+Ideas clave por si repreguntan:
+
+- **El gateway no tiene tabla:** no expone operaciones de negocio propias, solo rutea hacia estos endpoints.
+- **Dos niveles de seguridad:** según el diseño, el rol lo controla el gateway (401 y 403). Que la reserva sea tuya lo controla ms-reservas (403, RN7), porque solo él conoce al dueño.
+- **Por qué `PATCH` con la acción en la ruta:** aprobar, rechazar y cancelar cambian solo el estado y son acciones de negocio con sus propias reglas y permisos. Al tener cada una su ruta, el gateway les asigna un rol distinto.
+- **`validacion` y `compatibles` son `GET`:** preguntan, no cambian nada.
+
+---
+
+## Sección 04: Alcance funcional y proceso principal
+
+Integra el alcance y las reglas de la Entrega 1 (secciones 1 y 2) con lo implementado. Los identificadores F1 a F9 y P1 a P16 son nuevos; RN1 a RN15 son los de la Entrega 1 (T69).
+
+**El alcance en una respuesta**
+
+> "El MVP cubre el catálogo de espacios y el ciclo de vida completo de sus reservas. El proceso principal es reservar un espacio: el usuario busca o elige un espacio, el sistema valida el pedido con reglas de ms-reservas y de ms-espacios, y la reserva queda CONFIRMADA o, si es un evento, PENDIENTE hasta que bedelía decida. Después, el dueño puede cancelarla antes de que empiece. Quedan fuera el frontend, los pagos y las notificaciones."
+
+### 1. Funcionalidades
+
+**Incluidas en el MVP.** Prioridad Alta: sin ella, el proceso principal no se puede completar. Prioridad Media: lo complementa, pero el proceso funciona sin ella.
+
+| ID | Nombre | Actor | Comportamiento esperado | Resultado observable | Prioridad |
+|---|---|---|---|---|---|
+| F1 | Administrar espacios | ADMIN | Da de alta, modifica y da de baja espacios con nombre, tipo, capacidad, equipamiento, actividades admitidas, ubicación y horario | 201 o 200 con el espacio en `ApiResponse`; el catálogo refleja el cambio | Alta |
+| F2 | Consultar espacios | USUARIO, ADMIN | Lista el catálogo o muestra el detalle de un espacio | 200 con los datos del espacio o la lista; 404 si el id no existe | Media |
+| F3 | Buscar espacios disponibles | USUARIO | Recibe franja, actividad, asistentes y equipamiento, y combina los espacios compatibles de ms-espacios con la ocupación de ms-reservas | 200 con los espacios que sirven y están libres; la lista puede venir vacía | Alta |
+| F4 | Crear una reserva | USUARIO | Pasa el pedido por la cadena de validaciones, consulta a ms-espacios y guarda la reserva a nombre del usuario del token | 201 con la reserva en estado `CONFIRMADA` o `PENDIENTE` | Alta |
+| F5 | Aprobar o rechazar un evento | ADMIN | Resuelve una reserva `PENDIENTE` | 200 con la reserva en `CONFIRMADA` o `RECHAZADA`; si se rechaza, el espacio queda libre | Alta |
+| F6 | Consultar reservas propias | USUARIO | Lista las reservas del usuario del token, ordenadas por inicio; funciona aunque ms-espacios esté caído | 200 con la lista y el estado de cada reserva | Media |
+| F7 | Cancelar una reserva propia | USUARIO (dueño) | Cancela una reserva `PENDIENTE` o `CONFIRMADA` antes de su inicio; funciona aunque ms-espacios esté caído | 200 con la reserva en `CANCELADA`; el espacio vuelve a aparecer en las búsquedas | Media |
+| F8 | Consultar todas las reservas | ADMIN | Lista todas las reservas, con filtro opcional por estado | 200 con la lista; `?estado=PENDIENTE` muestra los eventos por resolver | Alta |
+| F9 | Autenticación y acceso por rol | USUARIO, ADMIN | Keycloak autentica y emite el JWT; el gateway verifica el token y el rol, y agrega `X-Usuario` | Pedido reenviado al servicio, o 401 o 403 si no se permite | Alta |
+
+**Fuera del alcance**
+
+| Queda afuera | Qué pasa en el MVP |
+|---|---|
+| Frontend | Se consume la API con Postman |
+| Pagos | Las reservas no tienen costo |
+| Notificaciones | El usuario ve el resultado de la aprobación consultando sus reservas (F6) |
+| Registro y gestión de usuarios | Los administra Keycloak; los de prueba se importan desde el realm |
+| Modificar una reserva | Hay que cancelarla y crear otra |
+| Reservas recurrentes | Cada reserva es una franja única |
+| Reservas hechas por bedelía o en nombre de otra persona | ADMIN no crea ni cancela reservas |
+| Registro de uso | No hay estado "finalizada" ni control de asistencia |
+| Vencimiento automático de pendientes | Bedelía debe resolver cada evento (ver E9) |
+| Revalidar reservas existentes | Si cambia el espacio o el pronóstico, las reservas ya creadas no se revisan |
+
+### 2. Reglas de negocio
+
+El dueño de cada regla es único: **ms-reservas** decide RN1, RN2, RN5, RN6, RN7, RN13, RN14 y RN15, y **ms-espacios** decide RN3, RN4 y RN8 a RN12. Un rechazo nunca guarda datos.
+
+| ID | Condición o disparador | Comportamiento esperado | Posibles rechazos | Funcionalidad |
+|---|---|---|---|---|
+| RN1 | Crear o buscar para una franja | El inicio es futuro y está a 14 días como máximo, el horizonte de pronóstico | 422 | F3, F4 |
+| RN2 | Crear o buscar para una franja | Dura entre 30 minutos y 4 horas, dentro del mismo día | 422 | F3, F4 |
+| RN3 | Validar un espacio en una franja | La franja está dentro del horario de apertura | F4: 422 con el motivo. F3: el espacio no se sugiere | F3, F4 |
+| RN4 | Validar una cancha en una franja | Si en alguna hora la probabilidad de lluvia supera el 60 %, no se reserva ni se sugiere | F4: 422 con el motivo, o 503 sin pronóstico. F3: la cancha no se sugiere, tampoco sin pronóstico | F3, F4 |
+| RN5 | Crear o buscar con una cantidad de asistentes | Los asistentes no superan la capacidad | F4: 422. F3: el espacio no se sugiere | F3, F4 |
+| RN6 | Crear o buscar en un espacio con reservas activas | No se superponen dos reservas `PENDIENTE` o `CONFIRMADA`; una que termina a las 12:00 no choca con otra que empieza a las 12:00 | F4: 409. F3: el espacio se descarta | F3, F4 |
+| RN7 | Pedido de cancelación | Solo cancela el dueño, y antes del inicio | 403 si no es el dueño; 422 si ya empezó | F7 |
+| RN8 | Pedido con equipamiento | El espacio tiene todo lo pedido | F4: 422 con lo que falta. F3: el espacio no se sugiere. Un equipamiento inexistente da 422 en ambas | F3, F4 |
+| RN9 | Validar la actividad | El espacio admite `CLASE`, `EXAMEN`, `EVENTO` o `DEPORTE`, según su configuración | F4: 422 con el motivo. F3: el espacio no se sugiere | F3, F4 |
+| RN10 | Validar un laboratorio | Solo de lunes a viernes y con 24 horas de anticipación | F4: 422 con el motivo. F3: no se sugiere | F3, F4 |
+| RN11 | Validar una sala | Máximo 2 horas | F4: 422 con el motivo. F3: no se sugiere | F3, F4 |
+| RN12 | Validar una cancha | Turnos de horas enteras: 60, 120, 180 o 240 minutos | F4: 422 con el motivo. F3: no se sugiere | F3, F4 |
+| RN13 | Reserva válida lista para guardarse | `EVENTO` nace `PENDIENTE`; el resto, `CONFIRMADA` | No rechaza: define el estado inicial | F4, F5 |
+| RN14 | Pedido de cambio de estado | Solo se permiten las transiciones de la tabla siguiente | 409 si la transición no existe; 422 si la reserva ya empezó y hay que aprobarla | F5, F7 |
+| RN15 | Pedidos simultáneos sobre el mismo espacio o la misma reserva | Solo gana uno, gracias a `@Version` en la agenda y en la reserva | 409; se puede reintentar | F4, F5, F7 |
+
+**Validaciones que no son reglas del negocio:** formato inválido o datos faltantes, 400; espacio o reserva inexistente, 404; en F1, apertura que no es anterior al cierre, 422; en F3, asistentes menor o igual a 0, 422.
+
+**Estados y transiciones de la reserva**
+
+| Estado | Significado | ¿Ocupa el espacio? |
+|---|---|---|
+| `PENDIENTE` | Evento a la espera de bedelía | Sí |
+| `CONFIRMADA` | Reserva vigente | Sí |
+| `RECHAZADA` | Evento rechazado por bedelía; estado final | No |
+| `CANCELADA` | Cancelada por su dueño; estado final | No |
+
+| Desde | Hacia | Disparador | Actor | Condición | Regla | Funcionalidad |
+|---|---|---|---|---|---|---|
+| Inicio | `PENDIENTE` | Crear reserva | USUARIO | Actividad `EVENTO` y validaciones aprobadas | RN13 | F4 |
+| Inicio | `CONFIRMADA` | Crear reserva | USUARIO | Otra actividad y validaciones aprobadas | RN13 | F4 |
+| `PENDIENTE` | `CONFIRMADA` | Aprobar | ADMIN | Antes del inicio | RN14 | F5 |
+| `PENDIENTE` | `RECHAZADA` | Rechazar | ADMIN | Ninguna | RN14 | F5 |
+| `PENDIENTE` | `CANCELADA` | Cancelar | Dueño | Antes del inicio | RN7, RN14 | F7 |
+| `CONFIRMADA` | `CANCELADA` | Cancelar | Dueño | Antes del inicio | RN7, RN14 | F7 |
+
+**Definición textual (`estados-reserva.puml`, PlantUML)**
+
+```plantuml
+@startuml estados-reserva
+!pragma layout smetana
+skinparam shadowing false
+hide empty description
+
+title CampusReservas — Estados de una reserva
+
+[*] --> PENDIENTE : se crea con actividad EVENTO
+[*] --> CONFIRMADA : se crea con otra actividad
+PENDIENTE --> CONFIRMADA : ADMIN aprueba\n(antes del inicio)
+PENDIENTE --> RECHAZADA : ADMIN rechaza
+PENDIENTE --> CANCELADA : dueño cancela\n(antes del inicio)
+CONFIRMADA --> CANCELADA : dueño cancela\n(antes del inicio)
+RECHAZADA --> [*]
+CANCELADA --> [*]
+
+@enduml
+```
+
+**Representación gráfica:** `estados-reserva.png`, generada desde esta definición con PlantUML.
+
+### 3. Proceso principal: reservar un espacio
+
+**Evento inicial:** un estudiante o docente necesita un espacio para una actividad. **Precondición:** bedelía cargó el catálogo (F1).
+
+**Participantes:** Usuario, Bedelía (ADMIN), Keycloak, API Gateway, ms-reservas, ms-espacios y Open-Meteo.
+
+**Resultado final:** la reserva queda `CONFIRMADA` y el espacio asegurado para esa franja, o el proceso termina sin ocupar el espacio: pedido rechazado, evento `RECHAZADA` o reserva `CANCELADA`.
+
+**Pasos, con sus funcionalidades y reglas**
+
+| Paso | Qué ocurre | Responsable | Funcionalidad | Reglas |
+|---|---|---|---|---|
+| P1 | Inicia sesión en Keycloak y obtiene un JWT | Usuario, Keycloak | F9 | Ninguna |
+| P2 | Valida el token y el rol, y agrega `X-Usuario`; se repite en cada pedido | API Gateway | F9 | Ninguna |
+| P3a | Si ya sabe qué espacio quiere, lo busca en el catálogo | Usuario, ms-espacios | F2 | Ninguna |
+| P3b | Si no, indica franja, actividad, asistentes y equipamiento | Usuario | F3 | Ninguna |
+| P4 | Controla la franja | ms-reservas | F3 | RN1, RN2 |
+| P5 | Filtra los espacios compatibles y, para las canchas, consulta Open-Meteo | ms-espacios | F3 | RN3, RN4, RN5, RN8 a RN12 |
+| P6 | Descarta los ocupados y devuelve las sugerencias | ms-reservas | F3 | RN6 |
+| P7 | Pide crear la reserva | Usuario | F4 | Ninguna |
+| P8 | Toma la agenda del espacio y controla la franja | ms-reservas | F4 | RN15, RN1, RN2 |
+| P9 | Valida el espacio y, para las canchas, consulta Open-Meteo | ms-espacios | F4 | RN3, RN9, RN8, RN10, RN11, RN12, RN4 |
+| P10 | Controla la capacidad y la superposición | ms-reservas | F4 | RN5, RN6 |
+| P11 | Define el estado inicial y guarda la reserva en una transacción | ms-reservas | F4 | RN13, RN15 |
+| P12 | Lista los eventos pendientes | Bedelía | F8 | Ninguna |
+| P13 | Revisa el evento y decide | Bedelía | F5 | Ninguna |
+| P14 | Pasa la reserva a `CONFIRMADA` o `RECHAZADA` | ms-reservas | F5 | RN14, RN15 |
+| P15 | Consulta sus reservas y conoce el resultado | Usuario | F6 | Ninguna |
+| P16 | Si cancela, pasa la reserva a `CANCELADA` y libera el espacio | ms-reservas | F7 | RN7, RN14, RN15 |
+
+La cadena de P8 a P10 se corta en el primer control que falla. F1 aporta la precondición del proceso.
+
+**Decisiones**
+
+| Decisión | Dónde | Resultado |
+|---|---|---|
+| ¿Token y rol válidos? | P2 | Sí: continúa. No: 401 o 403 |
+| ¿Ya sabe qué espacio quiere? | Después de P2 | Sí: P3a. No: búsqueda desde P3b |
+| ¿Alguna opción le sirve? | Después de P6 | Sí: P7. No: repite la búsqueda con otros criterios |
+| ¿Pasó todas las validaciones? | P8 a P10 | Sí: P11. No: rechazo sin guardar |
+| ¿Otro pedido ganó la agenda? | P11 | No: reserva guardada. Sí: 409 |
+| ¿Es un `EVENTO`? | P11 | Sí: `PENDIENTE` y pasa a bedelía. No: `CONFIRMADA` |
+| ¿Bedelía aprueba? | P13 | Sí: `CONFIRMADA`. No: `RECHAZADA` |
+| ¿El dueño cancela? | P15 | Sí: P16. No: conserva la reserva |
+
+**Excepciones relevantes**
+
+| ID | Situación | Paso | Respuesta del sistema | Cómo sigue el proceso |
+|---|---|---|---|---|
+| E1 | Token inválido o rol sin permiso | P2 | 401 o 403; el pedido no llega al servicio | Inicia sesión de nuevo o usa la cuenta correcta |
+| E2 | Datos mal formados | P3b, P7 | 400 con el detalle | Corrige el pedido |
+| E3 | Búsqueda sin resultados | P6 | 200 con lista vacía | Cambia los criterios |
+| E4 | El espacio no existe | P9 | 404 | Vuelve a elegir |
+| E5 | No cumple una regla | P4, P8 a P10 | 422 con el motivo | Corrige la franja o elige otro espacio |
+| E6 | Franja ocupada o pedidos simultáneos | P8, P10, P11 | 409 | Elige otra franja o reintenta |
+| E7 | ms-espacios no responde | P3a, P5, P9 | 503: no se consulta el catálogo, no se busca ni se crea | Reintenta después. F5 a F8 siguen funcionando con ms-reservas |
+| E8 | Open-Meteo no responde | P5, P9 | Búsqueda: omite las canchas. Crear en una cancha: 503 | Otros espacios no se ven afectados |
+| E9 | El evento llega a su inicio sin resolver | P13 | No se puede aprobar (422); sigue `PENDIENTE` y bedelía puede rechazarlo | Limitación aceptada del MVP |
+| E10 | Dos administradores o el dueño y bedelía actúan a la vez | P14, P16 | 409 para el que pierde | Consulta el estado y decide de nuevo |
+
+El orden de los controles en ms-espacios va de lo barato a lo caro: RN4 consulta Open-Meteo solo después de las demás reglas.
+
+**Definición textual (`proceso-reserva.puml`, diagrama de actividades de PlantUML)**
+
+```plantuml
+@startuml proceso-reserva
+skinparam shadowing false
+skinparam ActivityBackgroundColor #F5F7FA
+skinparam ActivityBorderColor #4A5A6A
+skinparam ActivityDiamondBackgroundColor #FFF4D6
+skinparam ArrowColor #4A5A6A
+skinparam SwimlaneTitleFontStyle bold
+
+title CampusReservas — Proceso principal: reservar un espacio
+
+|Usuario|
+start
+note left
+  Precondición: bedelía cargó
+  el catálogo de espacios (F1)
+end note
+:P1. Inicia sesión en Keycloak
+y obtiene un JWT;
+
+|API Gateway|
+:P2. Valida el JWT y el rol, y agrega
+X-Usuario (en cada pedido);
+if (¿Token y rol válidos?) then (no)
+  #FFE3E0:401 o 403;
+  stop
+else (sí)
+endif
+
+|Usuario|
+if (¿Ya sabe qué espacio quiere?) then (sí)
+  :P3a. Consulta el catálogo
+  y toma el id del espacio;
+else (no)
+  repeat
+    |Usuario|
+    :P3b. Indica franja, actividad,
+    asistentes y equipamiento;
+    |ms-reservas|
+    :P4. Controla RN1 y RN2;
+    |ms-espacios|
+    :P5. Filtra los compatibles
+    (RN3, RN4, RN5, RN8 a RN12);
+    |ms-reservas|
+    :P6. Descarta los ocupados (RN6)
+    y devuelve las sugerencias;
+    |Usuario|
+  repeat while (¿Alguna opción le sirve?) is (no) not (sí)
+endif
+
+|Usuario|
+:P7. Pide crear la reserva;
+
+|ms-reservas|
+:P8. Toma la agenda del espacio (RN15)
+y controla RN1 y RN2;
+
+|ms-espacios|
+:P9. Valida el espacio: RN3, RN9, RN8
+y las reglas de su tipo (RN10, RN11, RN12);
+note right
+  Solo canchas: consulta
+  Open-Meteo (RN4)
+end note
+
+|ms-reservas|
+:P10. Controla capacidad (RN5)
+y superposición (RN6);
+if (¿Pasó todas las validaciones?) then (no)
+  #FFE3E0:404, 409, 422 o 503
+  No guarda nada;
+  stop
+else (sí)
+endif
+
+:P11. Define el estado inicial (RN13)
+y guarda en una transacción (RN15);
+if (¿Otro pedido ganó la agenda?) then (sí)
+  #FFE3E0:409, puede reintentar
+  No guarda nada;
+  stop
+else (no)
+endif
+
+if (Estado inicial) then (PENDIENTE: es un EVENTO)
+  |Bedelía|
+  :P12. Lista las reservas pendientes;
+  :P13. Revisa el evento y decide;
+  |ms-reservas|
+  if (Decisión de bedelía) then (rechaza)
+    #E8E8E8:P14. Pasa a RECHAZADA (RN14)
+    y libera el espacio;
+    stop
+  else (aprueba)
+    :P14. Pasa a CONFIRMADA (RN14);
+  endif
+else (CONFIRMADA)
+endif
+
+|Usuario|
+:P15. Consulta sus reservas;
+if (¿Cancela antes del inicio?) then (sí)
+  |ms-reservas|
+  #E8E8E8:P16. Controla RN7 y RN14, pasa a
+  CANCELADA y libera el espacio;
+  stop
+else (no)
+  |Usuario|
+  #DFF3E3:Reserva CONFIRMADA:
+  espacio asegurado para la actividad;
+  stop
+endif
+
+@enduml
+```
+
+**Representación gráfica:** `proceso-reserva.png`, generada desde esta definición con PlantUML.
+
+**Explicación del diagrama**
+
+Es un diagrama de actividades con un carril por participante, para que se vea quién hace cada paso y dónde colaboran los dos microservicios. Muestra el recorrido de punta a punta: acceso, elección del espacio, validación, resolución del evento y cancelación. Por simplicidad, P16 aparece después de `CONFIRMADA`, pero el dueño también puede cancelar una reserva `PENDIENTE`, como indica la tabla de transiciones. Los rechazos en rojo resumen los cortes del acceso y de la creación; los de la búsqueda y el resto de las excepciones se detallan en la tabla.
+
+**Cómo explicar el proceso**
+
+> "El proceso empieza cuando alguien necesita un espacio. Inicia sesión en Keycloak y todos sus pedidos pasan por el gateway, que controla el token y el rol. Si no sabe qué espacio quiere, busca: ms-espacios devuelve los que cumplen las reglas y ms-reservas descarta los ocupados, porque ninguno de los dos puede resolverlo solo. Al crear la reserva, ms-reservas toma la agenda para evitar choques simultáneos y corre la cadena de validaciones; uno de sus eslabones le pregunta a ms-espacios si el espacio sirve y, si es una cancha, ese servicio consulta el pronóstico. Si todo pasa, la reserva nace CONFIRMADA o, si es un evento, PENDIENTE hasta que bedelía la apruebe o la rechace. El dueño puede cancelarla antes del inicio. PENDIENTE y CONFIRMADA ocupan el espacio; RECHAZADA y CANCELADA lo liberan."
+
+Ideas clave por si repreguntan:
+
+- **Por qué RN1 y RN2 se controlan en P4 y en P8:** la búsqueda y la creación son pedidos independientes. Entre uno y otro pudo pasar el tiempo o cambiar la ocupación, y además se puede crear una reserva sin buscar. Por eso, buscar nunca garantiza la reserva.
+- **Por qué un evento pendiente ocupa el espacio:** si no lo hiciera, otra persona podría tomar la franja mientras bedelía decide, y la aprobación fallaría.
+- **Por qué aprobar no vuelve a validar:** RN6 ya protege la franja y las condiciones del espacio se controlaron al crear. Por eso el clima de una cancha no se revisa al aprobar; es un límite del MVP.
+- **Por qué rechazar no exige "antes del inicio":** rechazar no usa el espacio. Es la salida que le queda a bedelía para un evento que venció sin resolverse (E9).
+- **Orden en aprobar y cancelar:** primero se controla si la reserva ya empezó (422) y después la transición (409). Por eso, una reserva ya empezada da 422 aunque tampoco admita esa transición.
+- **Por qué F7 funciona sin ms-espacios:** ms-reservas tiene todo lo que necesita, incluido el nombre del espacio (D11).
+
+**Límites conocidos**
+
+- Dar de baja o modificar un espacio no revisa sus reservas, porque ms-espacios no conoce la ocupación y la comunicación va en un solo sentido. Las reservas conservan el nombre copiado.
+- El pronóstico se consulta al buscar y al crear. Si empeora después, la reserva sigue vigente.
+- Una reserva `CONFIRMADA` conserva ese estado después de terminar, y una `PENDIENTE` no vence sola (E9).
+
+---
+
+## Sección 05: Arquitectura, Contexto (C1)
+
+Actualiza el C1 de la Entrega 1 (sección 3) para que coincida con lo implementado; los cambios están en T66.
+
+**Definición textual (`c1-contexto.puml`, C4-PlantUML)**
+
+```plantuml
+@startuml c1-contexto
+!pragma layout smetana
+!include <C4/C4_Context>
+
+title CampusReservas — Diagrama de Contexto (C1)
+
+Person(usuario, "Usuario", "Estudiante o docente. Rol USUARIO. Consulta espacios, busca disponibles, reserva y cancela sus reservas.")
+Person(admin, "Administrador", "Bedelía. Rol ADMIN. Administra los espacios, aprueba o rechaza eventos y consulta todas las reservas.")
+
+System(campus, "CampusReservas", "Backend de reservas de espacios de la facultad. Valida cada reserva según el tipo de espacio, maneja su ciclo de vida y sugiere espacios disponibles.")
+
+System_Ext(keycloak, "Keycloak", "Identity Provider. Guarda usuarios y roles, autentica con OIDC y emite JWT firmados.")
+System_Ext(openmeteo, "Open-Meteo", "API pública de pronóstico del tiempo por coordenadas. Sin API key.")
+
+Rel_D(usuario, campus, "Consulta espacios, busca\ndisponibles, reserva y cancela", "HTTP/JSON + JWT")
+Rel_U(admin, campus, "Administra espacios, aprueba\no rechaza eventos y lista reservas", "HTTP/JSON + JWT")
+Rel(usuario, keycloak, "Inicia sesión\ny obtiene un JWT", "OIDC")
+Rel(admin, keycloak, "Inicia sesión\ny obtiene un JWT", "OIDC")
+Rel_R(campus, keycloak, "Obtiene las claves públicas\npara validar los JWT", "HTTP/JWKS")
+Rel_L(campus, openmeteo, "Consulta la probabilidad de lluvia\npor hora (solo canchas)", "HTTPS/JSON")
+
+SHOW_LEGEND()
+@enduml
+```
+
+**Representación gráfica:** `c1-contexto.png`, generada desde esta definición con PlantUML 1.2024.3. La línea `!pragma layout smetana` permite renderizarla sin instalar Graphviz.
+
+**Elementos**
+
+| Elemento | Tipo | Descripción |
+|---|---|---|
+| Usuario | Persona | Estudiante o docente, con rol `USUARIO`. Consulta espacios, busca los disponibles, crea reservas, y ve y cancela las suyas. |
+| Administrador | Persona | Bedelía, con rol `ADMIN`. Da de alta, modifica y da de baja espacios, aprueba o rechaza eventos y consulta todas las reservas. No crea reservas. |
+| CampusReservas | Sistema a construir | Backend REST que gestiona el catálogo de espacios y sus reservas: aplica las reglas de negocio RN1 a RN15, maneja los estados de la reserva y sugiere espacios disponibles. No incluye frontend, pagos ni notificaciones. |
+| Keycloak | Sistema externo | Identity Provider. Guarda usuarios, contraseñas y roles en el realm `campus`, autentica con OIDC y emite JWT firmados. No lo programamos: lo configuramos. |
+| Open-Meteo | Sistema externo | API pública y gratuita de pronóstico, sin API key. Da la probabilidad de lluvia por hora para unas coordenadas. |
+
+**Relaciones**
+
+| Origen → Destino | Qué intercambian | Protocolo |
+|---|---|---|
+| Usuario → Keycloak | Se autentica y recibe un JWT con su rol | OIDC |
+| Administrador → Keycloak | Se autentica y recibe un JWT con su rol | OIDC |
+| Usuario → CampusReservas | Consulta espacios, busca disponibles, reserva y cancela; cada pedido lleva el JWT | HTTP/JSON con `Authorization: Bearer` |
+| Administrador → CampusReservas | Administra espacios, aprueba o rechaza eventos y lista reservas; cada pedido lleva el JWT | HTTP/JSON con `Authorization: Bearer` |
+| CampusReservas → Keycloak | Baja las claves públicas del realm para verificar la firma de los JWT; no le consulta cada pedido | HTTP/JWKS |
+| CampusReservas → Open-Meteo | Pide el pronóstico por hora de la ubicación, solo para las canchas (RN4). Si no responde: 503 al reservar una cancha, y las canchas se omiten de las búsquedas | HTTPS/JSON |
+
+**Cómo explicar el diagrama**
+
+> "El diagrama de Contexto es el nivel más alto de C4: muestra el sistema como una sola caja, quién lo usa y de qué sistemas depende, sin decir cómo está construido. CampusReservas lo usan dos tipos de personas, Usuario y Administrador, que se distinguen por su rol. Depende de dos sistemas que no construimos: Keycloak para la identidad y Open-Meteo para el pronóstico. Primero la persona inicia sesión en Keycloak y recibe un JWT; después lo manda en cada pedido a CampusReservas, que verifica la firma con las claves públicas de Keycloak. Si el espacio es una cancha, además consulta la lluvia en Open-Meteo."
+
+Ideas clave por si repreguntan:
+
+- **Por qué Keycloak es externo si corre en nuestro Docker Compose:** la frontera del C1 marca lo que construimos, no dónde se despliega. Keycloak es un producto que configuramos; su comportamiento no es nuestro.
+- **Dónde están el gateway, los microservicios y las bases:** son partes internas de la caja CampusReservas. Aparecen en el C2 (Contenedores).
+- **Por qué Postman no aparece:** es una herramienta para consumir la API, no un actor ni parte del sistema. Los actores son las personas (D24).
+- **Por qué dos actores:** tienen roles y operaciones distintas, y la autorización depende de eso. Por ejemplo, un ADMIN no puede crear reservas.
+- **Por qué CampusReservas → Keycloak:** el sistema usa las claves públicas para verificar los JWT por su cuenta, sin preguntarle a Keycloak por cada pedido.
+- **Por qué HTTP y no HTTPS:** el gateway y Keycloak (`start-dev`) corren sin certificado, en local. Open-Meteo sí es HTTPS. En producción, todo iría por HTTPS.
+- **Por qué Open-Meteo solo para canchas:** son los únicos espacios al aire libre. Aulas, laboratorios y salas no se ven afectados si falla (D14 y D15).
+
+---
+
+## Arquitectura: Contenedores (C2)
+
+**Respuesta de la Sección 06**
+
+CampusReservas se despliega con Docker Compose y se compone de tres aplicaciones Spring (API Gateway, ms-reservas y ms-espacios), una base H2 por microservicio y el JAR común campus-commons. Keycloak 26 corre en el mismo despliegue, pero es un producto externo al sistema. Open-Meteo es un sistema externo. Solo API Gateway y Keycloak publican puertos: la red interna de Docker funciona como trusted zone.
+
+| Elemento | Tipo | Tecnología | Responsabilidad | Puerto |
+|---|---|---|---|---|
+| API Gateway | Aplicación | Spring Cloud Gateway 5, Spring Boot 4.1, Java 25 | Único punto de entrada. Rutea por path, valida el JWT (401) y el rol por ruta (403), y agrega `X-Usuario` | 8080, publicado |
+| ms-reservas | Microservicio | Spring Boot 4.1, Java 25, Spring Data JPA | Ciclo de vida de la reserva, búsqueda de disponibles, cadena de validaciones (RN1, RN2, RN5, RN6), estados (RN7, RN13, RN14) y concurrencia (RN15) | 8082, interno |
+| ms-espacios | Microservicio | Spring Boot 4.1, Java 25, Spring Data JPA | ABM de espacios, validación de una franja por tipo de espacio (RN3, RN4, RN8 a RN12), espacios compatibles y consulta del pronóstico | 8081, interno |
+| reservas-db | Almacén | H2 embebida en archivo | Reservas y agenda por espacio. Solo la usa ms-reservas | Ninguno |
+| espacios-db | Almacén | H2 embebida en archivo | Espacios, equipamiento y actividades admitidas. Solo la usa ms-espacios | Ninguno |
+| campus-commons | Librería | JAR Maven instalado en `.m2` | `ApiResponse`, excepciones de negocio y manejo de errores común. No se ejecuta: viaja dentro de ms-reservas y ms-espacios | No se despliega |
+| Keycloak 26 | Externo al sistema | Keycloak, OIDC y JWT | Identity Provider: realm `campus`, usuarios, roles `USUARIO` y `ADMIN`, emisión de JWT | 8180, publicado |
+| Open-Meteo | Sistema externo | API pública HTTPS/JSON | Probabilidad de lluvia por hora y coordenadas | Externo |
+
+| Origen → destino | Protocolo | Para qué |
+|---|---|---|
+| Usuario y Administrador → Keycloak | OIDC/HTTP | Inician sesión y reciben un JWT con sus roles |
+| Usuario y Administrador → API Gateway | HTTP/JSON + `Authorization: Bearer <jwt>` | Invocan `/api/espacios/**` y `/api/reservas/**` |
+| API Gateway → Keycloak | JWKS/HTTP | Baja las claves públicas para verificar la firma, sin consultar a Keycloak en cada pedido |
+| API Gateway → ms-reservas y ms-espacios | HTTP/JSON + `X-Usuario` | Rutea por path; borra cualquier `X-Usuario` del cliente y lo completa con `preferred_username` |
+| ms-reservas → ms-espacios | HTTP/JSON síncrono con `RestClient` | `GET /api/espacios/{id}/validacion` al crear y `GET /api/espacios/compatibles` al buscar. Una sola dirección |
+| ms-espacios → Open-Meteo | HTTPS/JSON | Pide el pronóstico solo para canchas (RN4) |
+| ms-reservas → reservas-db, ms-espacios → espacios-db | JPA/JDBC | Cada servicio accede solo a su base |
+| ms-reservas y ms-espacios → campus-commons | Dependencia Maven | Relación de compilación; no hay comunicación en ejecución |
+
+Fallas: si ms-espacios no responde, crear y buscar dan 503, pero listar y cancelar siguen funcionando porque la reserva guarda el nombre del espacio. Si Open-Meteo falla, reservar una cancha da 503 y las búsquedas la omiten; los demás espacios no se ven afectados. Si un microservicio está apagado, API Gateway responde 503; si queda colgado, responde 504 a los 10 segundos.
+
+Definición textual editable (`c2-contenedores.puml`, C4-PlantUML):
+
+```plantuml
+@startuml c2-contenedores
+!pragma layout smetana
+!include <C4/C4_Container>
+
+title CampusReservas — Diagrama de Contenedores (C2)
+
+AddElementTag("libreria", $bgColor="#7A8FA6", $fontColor="#FFFFFF", $legendText="librería Java (no se despliega)")
+
+Person(usuario, "Usuario", "Estudiante o docente. Busca espacios, reserva y cancela sus reservas.")
+Person(admin, "Administrador", "Bedelía. Administra espacios, aprueba o rechaza eventos y consulta todas las reservas.")
+
+System_Ext(openmeteo, "Open-Meteo", "API pública de pronóstico del tiempo por coordenadas.")
+
+Boundary(docker, "Despliegue Docker Compose — red interna (trusted zone)") {
+    Container_Ext(keycloak, "Keycloak 26", "Identity Provider", "Puerto publicado 8180. Realm campus: usuarios y roles USUARIO y ADMIN. Emite JWT (OIDC).")
+
+    System_Boundary(campus, "CampusReservas") {
+        Container(gateway, "API Gateway", "Spring Cloud Gateway 5, Spring Boot 4.1, Java 25", "Único punto de entrada (puerto publicado 8080). Ruteo por path. Security Filter: valida el JWT y el rol por ruta; agrega el header X-Usuario.")
+        Container(msreservas, "ms-reservas", "Spring Boot 4.1, Java 25, Spring Data JPA", "Puerto interno 8082. Ciclo de vida de la reserva: crear, aprobar, rechazar, cancelar y listar. Busca espacios disponibles. Cadena de validaciones, estados y concurrencia.")
+        Container(msespacios, "ms-espacios", "Spring Boot 4.1, Java 25, Spring Data JPA", "Puerto interno 8081. ABM de espacios. Valida una franja con una estrategia por tipo de espacio. Lista los espacios compatibles. Consulta el pronóstico.")
+        ContainerDb(reservasdb, "reservas-db", "H2 embebida en archivo", "Reservas y agenda por espacio (versión para concurrencia). Solo la usa ms-reservas.")
+        ContainerDb(espaciosdb, "espacios-db", "H2 embebida en archivo", "Espacios, equipamiento y actividades admitidas. Solo la usa ms-espacios.")
+        Container(commons, "campus-commons", "JAR Maven instalado en .m2", "ApiResponse, excepciones de negocio y manejo de errores común.", $tags="libreria")
+    }
+}
+
+Rel(usuario, keycloak, "Inicia sesión y obtiene el JWT", "OIDC/HTTP")
+Rel(admin, keycloak, "Inicia sesión y obtiene el JWT", "OIDC/HTTP")
+Rel(usuario, gateway, "Consulta espacios y opera sus reservas", "HTTP/JSON + Bearer JWT")
+Rel(admin, gateway, "Administra espacios y aprueba eventos", "HTTP/JSON + Bearer JWT")
+
+Rel_L(gateway, keycloak, "Obtiene las claves públicas", "JWKS/HTTP")
+Rel(gateway, msreservas, "Rutea /api/reservas/**", "HTTP/JSON + X-Usuario")
+Rel(gateway, msespacios, "Rutea /api/espacios/**", "HTTP/JSON + X-Usuario")
+
+Rel_R(msreservas, msespacios, "Valida un espacio y pide los compatibles", "HTTP/JSON, RestClient")
+Rel(msreservas, reservasdb, "Lee y escribe", "JPA/JDBC")
+Rel(msespacios, espaciosdb, "Lee y escribe", "JPA/JDBC")
+Rel(msespacios, openmeteo, "Pide el pronóstico de lluvia (solo canchas)", "HTTPS/JSON")
+
+Rel(msreservas, commons, "Dependencia Maven")
+Rel(msespacios, commons, "Dependencia Maven")
+
+SHOW_LEGEND()
+@enduml
+```
+
+Ideas clave por si repreguntan:
+
+- **Contenedor de C4 vs. contenedor de Docker:** en C4, un contenedor es algo que se ejecuta o que guarda datos. Docker corre cuatro: `keycloak`, `ms-espacios`, `ms-reservas` y `api-gateway`. Las bases son contenedores de C4, pero no de Docker: H2 corre dentro del proceso de cada microservicio.
+- **Por qué dibujamos las bases aparte si están embebidas:** porque cada una es un almacén con un único dueño, y eso es lo que el diagrama tiene que mostrar (D9).
+- **campus-commons no es un contenedor:** es una librería y no se ejecuta. Lo dejamos en el diagrama con otro color, igual que en la Entrega 1, para mostrar la dependencia y que no se despliega.
+- **Por qué API Gateway no usa campus-commons:** el JAR común está pensado para Spring MVC y el gateway es reactivo (T63).
+- **Por qué Keycloak queda dentro de la red, pero fuera de CampusReservas:** lo desplegamos con Compose, pero no lo programamos: es un producto externo. El C1 también lo muestra afuera.
+- **`X-Usuario` llega a los dos servicios:** el filtro es global, pero solo lo usa ms-reservas (RN7).
+- **Timeouts:** API Gateway usa 2 s para conectar y 10 s para responder. ms-reservas → ms-espacios y ms-espacios → Open-Meteo usan 2 s y 3 s.
+
+---
+
+## Sección 08: Arquitectura, Persistencia
+
+**Respuesta de la Sección 08**
+
+CampusReservas tiene dos bases de datos propias, una por microservicio: `espacios-db`, que administra ms-espacios, y `reservas-db`, que administra ms-reservas. Las dos son H2 embebida en archivo. Ninguna tabla tiene una clave foránea hacia la otra base: las reservas guardan el id del espacio como un dato común, y lo que necesitan del catálogo lo piden por la API de ms-espacios. Los usuarios no están en estas bases: los administra Keycloak, y la reserva guarda solo el nombre de usuario que viene del token.
+
+El diagrama documenta el esquema real: lo leímos de `INFORMATION_SCHEMA` en las bases que crea Hibernate a partir de las entidades (T67).
+
+Definición textual editable (`der-persistencia.puml`, PlantUML):
+
+```plantuml
+@startuml der-persistencia
+!pragma layout smetana
+hide circle
+hide methods
+skinparam linetype ortho
+skinparam shadowing false
+skinparam roundCorner 6
+skinparam defaultFontName Arial
+skinparam packageStyle rectangle
+skinparam ArrowColor #333333
+skinparam class {
+    BackgroundColor #FFFFFF
+    BorderColor #333333
+    HeaderBackgroundColor #E8EEF5
+}
+
+title CampusReservas — Diagrama Entidad-Relación (una base por microservicio)
+
+package "espacios-db (H2) — dueño: ms-espacios" as espaciosdb {
+    entity "espacios" as espacios {
+        * id : BIGINT <<PK, identity>>
+        --
+        nombre : VARCHAR(255)
+        tipo : VARCHAR(255) <<CHECK>>
+        * capacidad : INTEGER
+        * latitud : DOUBLE
+        * longitud : DOUBLE
+        hora_apertura : TIME
+        hora_cierre : TIME
+    }
+
+    entity "espacio_equipamiento" as equipamiento {
+        * espacio_id : BIGINT <<FK, UK>>
+        {field} equipamiento : VARCHAR(255) <<UK, CHECK>>
+    }
+
+    entity "espacio_actividades" as actividades {
+        * espacio_id : BIGINT <<FK, UK>>
+        {field} actividad : VARCHAR(255) <<UK, CHECK>>
+    }
+}
+
+package "reservas-db (H2) — dueño: ms-reservas" as reservasdb {
+    entity "reservas" as reservas {
+        * id : BIGINT <<PK, identity>>
+        --
+        espacio_id : BIGINT <<ref. lógica>>
+        espacio_nombre : VARCHAR(255) <<copia>>
+        usuario : VARCHAR(255)
+        inicio : TIMESTAMP
+        fin : TIMESTAMP
+        * asistentes : INTEGER
+        actividad : VARCHAR(255) <<CHECK>>
+        estado : VARCHAR(255) <<CHECK>>
+        * version : BIGINT <<@Version>>
+    }
+
+    entity "agenda_espacio" as agenda {
+        * espacio_id : BIGINT <<PK, ref. lógica>>
+        --
+        * version : BIGINT <<@Version>>
+    }
+}
+
+espacios ||--o{ equipamiento : "tiene"
+espacios ||--|{ actividades : "admite"
+
+agenda ||..|{ reservas : "ordena (mismo espacio_id, sin FK)"
+espacios ||..o{ reservas : "reservado en (por API, sin FK)"
+espacios ||..o| agenda : "se agenda en (por API, sin FK)"
+
+legend right
+    Línea continua: clave foránea real, dentro de la misma base.
+    Línea punteada: relación lógica, sin FK; no la controla la base.
+    * = NOT NULL en la base. UK = UNIQUE compuesta (espacio_id, valor).
+    CHECK = columna limitada a los valores del enum al crear la tabla.
+endlegend
+@enduml
+```
+
+**Representación gráfica:** `der-persistencia.png`, generada desde esta definición con PlantUML 1.2024.3. La línea `!pragma layout smetana` permite renderizarla sin instalar Graphviz.
+
+### Bases y quién las administra
+
+| Base | Administra | Tablas | Archivo | Qué guarda |
+|---|---|---|---|---|
+| `espacios-db` | ms-espacios | `espacios`, `espacio_equipamiento`, `espacio_actividades` | `jdbc:h2:file:./data/espacios` | El catálogo: datos del lugar, equipamiento y actividades admitidas |
+| `reservas-db` | ms-reservas | `reservas`, `agenda_espacio` | `jdbc:h2:file:./data/reservas` | Las reservas con su estado, y la versión por espacio para la concurrencia |
+
+Keycloak también persiste datos (usuarios, contraseñas, roles y clientes del realm `campus`), pero en su propio almacenamiento interno, que no diseñamos ni accedemos. Por eso no forma parte del DER: la configuración que nos importa está versionada en `keycloak/realm-campus.json` y se importa al arrancar.
+
+El pronóstico de Open-Meteo no se guarda en ninguna base: cambia hora a hora, así que se consulta cada vez.
+
+### Entidades
+
+| Tabla | Entidad Java | Clave | Para qué existe |
+|---|---|---|---|
+| `espacios` | `Espacio` | PK `id`, autoincremental | Un lugar reservable. `tipo` decide qué estrategia de validación se usa. Las coordenadas se mandan a Open-Meteo y solo importan en las canchas |
+| `espacio_equipamiento` | `@ElementCollection` de `Espacio` | Sin PK. `UNIQUE (espacio_id, equipamiento)` y FK a `espacios` | Lo que tiene cada espacio: `PROYECTOR`, `COMPUTADORAS`, `PIZARRA` o `SONIDO` (RN8) |
+| `espacio_actividades` | `@ElementCollection` de `Espacio` | Sin PK. `UNIQUE (espacio_id, actividad)` y FK a `espacios` | Lo que admite cada espacio: `CLASE`, `EXAMEN`, `EVENTO` o `DEPORTE` (RN9) |
+| `reservas` | `Reserva` | PK `id`, autoincremental | Una reserva: quién, qué espacio, qué franja, cuántas personas, qué actividad y en qué estado. `version` evita que aprobar y cancelar a la vez se pisen |
+| `agenda_espacio` | `AgendaEspacio` | PK `espacio_id`, asignada por nosotros | Una fila por espacio ya reservado. Solo existe para que dos reservas simultáneas choquen en un punto común (RN15) |
+
+### Relaciones y cardinalidades
+
+| Relación | Cardinalidad | Cómo se implementa | Quién la controla |
+|---|---|---|---|
+| `espacios` → `espacio_equipamiento` | 1 a 0..* | FK `espacio_id` | La base. La cancha de los datos de prueba no tiene equipamiento |
+| `espacios` → `espacio_actividades` | 1 a 1..* | FK `espacio_id` | La FK la controla la base. El mínimo de una actividad lo controla `@NotEmpty` en `EspacioRequest` (T23) |
+| `espacios` → `reservas` | 1 a 0..* | `reservas.espacio_id`, sin FK, entre dos bases | ms-reservas valida que el espacio exista por HTTP solo al crear (404). Si después se borra el espacio, la reserva queda con el id y el nombre copiado (T35) |
+| `espacios` → `agenda_espacio` | 1 a 0..1 | `agenda_espacio.espacio_id`, sin FK, entre dos bases | ms-reservas. La fila se crea con la primera reserva del espacio, no al crear el espacio |
+| `agenda_espacio` → `reservas` | 1 a 1..* | Mismo `espacio_id`, sin FK, aunque están en la misma base | `ReservaService`. Si una reserva falla, la transacción deshace también la fila de agenda nueva |
+| `reservas.usuario` → usuario de Keycloak | Muchas a 1 | `preferred_username` como texto | El gateway, que toma el dato del token validado |
+
+### Decisiones de persistencia
+
+| Decisión | Por qué | Costo que aceptamos |
+|---|---|---|
+| **Una base por microservicio** (D9) | Cada servicio es dueño de sus datos y puede cambiar sus tablas sin romper al otro. Lo único que comparten es la API | No hay integridad referencial ni transacción entre las dos bases |
+| **H2 embebida en archivo** (D10) | El enunciado la acepta, no suma contenedores y los datos sobreviven a un reinicio | Un solo proceso puede abrir el archivo |
+| **`espacio_id` sin relación JPA** (D9) | Una relación `@ManyToOne` necesita una FK a una tabla de la misma base | Puede quedar una reserva de un espacio ya borrado |
+| **Copia de `espacio_nombre`** (D11) | Listar y cancelar funcionan con ms-espacios caído, y un listado no hace una llamada por reserva | Si se renombra un espacio, las reservas viejas muestran el nombre anterior |
+| **Enums en vez de tablas de catálogo** (D12, T17) | Son listas cortas y estables, y se guardan como texto legible (`EnumType.STRING`) | Agregar un valor requiere recompilar y tratar la base (ver Límites conocidos) |
+| **`@ElementCollection` con `Set`** (T19, T21) | Son valores sin identidad propia. El `Set` hace que Hibernate cree la `UNIQUE`, así que un espacio no puede tener dos veces el mismo valor | No se pueden agregar atributos al valor, como la cantidad de proyectores |
+| **Sin herencia de entidades** (D16, T16) | Lo que cambia por tipo de espacio son las reglas, no los datos | Todos los espacios tienen latitud y longitud, aunque solo las usan las canchas |
+| **`agenda_espacio` con `@Version`** (D21) | Dos reservas simultáneas son filas nuevas y distintas, así que necesitan una fila en común donde chocar. Una restricción de la base no puede expresar "dos rangos que se superponen" | Una tabla extra sin datos de negocio. El que pierde recibe 409 y reintenta |
+| **`@Version` en `Reserva`** (D21) | Aprobar y cancelar a la vez no se pisan: el segundo recibe 409 | Ninguno relevante: lo maneja JPA |
+| **Sin tabla de usuarios** | Keycloak es el dueño de la identidad; repetirla daría dos fuentes de verdad | `usuario` es un texto sin FK |
+| **`ddl-auto: update`** | Hibernate crea las tablas desde las entidades, sin escribir scripts | En producción se usarían migraciones (Flyway o Liquibase) |
+
+### Límites conocidos
+
+- **Agregar un valor a un enum en una base existente falla.** `@JdbcTypeCode(SqlTypes.VARCHAR)` hace que la columna sea texto, pero Hibernate igual crea un `CHECK` con los valores del enum, y `ddl-auto: update` no lo amplía. Lo probamos: `AUDITORIO` fue rechazado sobre una base existente y aceptado en la lista al crear una base nueva. Para sumar un valor hay que borrar `data/` (`DatosIniciales` recarga los espacios, pero se pierden las reservas) o eliminar el `CHECK` a mano (T68).
+- **Las reglas están en la aplicación, no en la base.** Salvo las claves primarias y foráneas, `capacidad`, `latitud`, `longitud`, `asistentes` y `version`, las columnas aceptan `NULL`. Que vengan completas lo garantizan `@Valid` y los services. Es seguro porque cada base tiene un solo servicio que escribe en ella.
+- **Sin índices propios.** Solo existen los de las claves y las `UNIQUE`, así que la consulta de superposición (RN6) recorre `reservas`. Con el volumen del TP no se nota; en producción agregaríamos un índice por `(espacio_id, inicio)`.
+- **Sin borrado de reservas.** Cancelar y rechazar cambian el estado, así que la tabla conserva el historial.
+- **Persistencia en Docker.** El Compose del plan no monta un volumen en `data/`. Sin volumen, los datos sobreviven a `docker compose restart`, pero se pierden con `docker compose down`, que borra los contenedores.
+
+**Cómo explicar el diagrama**
+
+> "Hay dos bases porque hay dos dueños de datos. `espacios-db` es de ms-espacios: una tabla de espacios y dos tablas de valores, equipamiento y actividades, con clave foránea real. `reservas-db` es de ms-reservas: las reservas y una agenda con una fila por espacio. Las líneas continuas son claves foráneas; las punteadas son relaciones que la base no controla. Una reserva apunta a un espacio con `espacio_id`, pero no hay FK porque el espacio vive en otra base: ms-reservas lo valida por HTTP al crear, y guarda una copia del nombre para poder listar aunque ms-espacios esté caído. La agenda parece vacía, pero es la clave de la concurrencia: dos reservas simultáneas son filas distintas y no chocarían, así que cada una incrementa la versión de la fila de su espacio, y la segunda recibe 409. Si es la primera reserva del espacio, las dos intentan crear la fila, y la segunda recibe 409 porque viola la clave primaria."
+
+Ideas clave por si repreguntan:
+
+- **Por qué no se puede poner una FK entre las dos bases:** una FK solo referencia tablas de la misma base. Además, si se pudiera, los servicios quedarían acoplados por el esquema.
+- **Qué pasa con la consistencia:** no hay transacción distribuida. Crear una reserva lee ms-espacios y escribe solo en `reservas-db`, así que una sola transacción local alcanza.
+- **Por qué `agenda_espacio` no tiene FK a `reservas`:** la fila no pertenece a ninguna reserva; agrupa a todas las de un espacio. Se relaciona por el valor de `espacio_id`, y no hay una tabla de espacios en esa base para referenciar.
+- **Por qué las tablas de `@ElementCollection` no tienen PK:** no son entidades, no tienen identidad propia. Sus filas se identifican por el par `(espacio_id, valor)`, que tiene `UNIQUE`.
+- **Qué pasa al borrar un espacio:** Hibernate borra primero sus filas de equipamiento y actividades, y después el espacio. Las FK tienen `NO ACTION`: el borrado en cascada lo hace JPA, no la base. Las reservas no cambian, porque están en otra base.
+- **`CHECK` vs. `ENUM` nativo:** con los dos, la base rechaza un valor nuevo. La diferencia es que la columna `VARCHAR` no cambia de tipo: alcanza con quitar la restricción.
+- **El `synchronized` de D21 y las dos instancias:** con H2 embebida hay una sola instancia de ms-reservas, porque otro proceso no puede abrir el mismo archivo. El argumento de D21 vale cuando la base es compartida: el control ya está en la base, así que pasar a un motor con servidor no lo cambia.
+
+---
+
+## Sección 10: Seguridad y autorización
+
+Cubre lo que pide la consigna: autenticación, roles, recursos protegidos, comportamiento ante accesos no autorizados y cómo se comprueba. El detalle de cada clase está en **Fase 3: Gateway y seguridad**, y las decisiones en D5 a D8 del plan.
+
+**La seguridad del TP en una respuesta**
+
+> "La autenticación la resuelve Keycloak: el usuario inicia sesión ahí y recibe un JWT firmado con sus roles. La autorización la resuelve el API Gateway, que es la única entrada al backend: verifica el token (si no es válido, 401) y controla que el rol pueda usar esa ruta (si no, 403). Lo que no está permitido de forma explícita está prohibido. Como el rol no alcanza para saber de quién es una reserva, esa última regla la controla ms-reservas: si usuario2 quiere cancelar la reserva de usuario1, responde 403. Se comprueba con Postman y tokens reales: usuario1 lista los espacios y recibe 200, pero si intenta crear uno recibe 403, y sin token recibe 401."
+
+### Mecanismo de autenticación
+
+Usamos **OpenID Connect con JWT**, y **Keycloak** como Identity Provider. El backend no guarda contraseñas ni tiene un login propio.
+
+1. El cliente envía usuario y contraseña a Keycloak (realm `campus`, cliente público `campus-api`).
+2. Keycloak devuelve un JWT firmado con `preferred_username` y los roles en `realm_access.roles`.
+3. El cliente manda el token en cada pedido: `Authorization: Bearer <jwt>`.
+4. El gateway (`oauth2ResourceServer().jwt()`) verifica la firma con las claves públicas de Keycloak, el vencimiento (`exp`) y el emisor (`iss`). No necesita consultar a Keycloak por cada pedido.
+5. Si el token es válido, el gateway borra cualquier `X-Usuario` que haya mandado el cliente, lo reemplaza por el `preferred_username` del token y reenvía el pedido.
+
+Sin frontend, pedimos el token con el flujo *password*, **solo para probar con Postman**. Una aplicación real usaría *Authorization Code* (D7).
+
+Los microservicios no validan el token: confían en el gateway porque, en Docker, no publican puertos (trusted zone, D6).
+
+### Roles y usuarios de prueba
+
+Los dos son roles de realm de Keycloak. Los usuarios se importan desde `keycloak/realm-campus.json`, con contraseña igual al nombre de usuario.
+
+| Rol | Quién es | Usuarios de prueba | Qué puede hacer |
+|---|---|---|---|
+| `USUARIO` | Estudiante o docente | `usuario1`, `usuario2` | Consultar espacios, buscar disponibles, reservar, ver y cancelar sus reservas |
+| `ADMIN` | Bedelía | `admin1` | Consultar y administrar espacios, ver todas las reservas, aprobar o rechazar eventos |
+
+Los roles no son acumulativos: `ADMIN` no incluye a `USUARIO`. Por eso admin1 no puede reservar ni cancelar.
+
+### Recursos protegidos
+
+Todas las rutas del gateway son protegidas: **sin un token válido, cualquiera de ellas responde 401**. Con un token válido:
+
+| Recurso | Ruta | USUARIO | ADMIN |
+|---|---|---|---|
+| Consultar espacios y validar franjas | `GET /api/espacios/**` | 200 | 200 |
+| Crear, modificar o borrar espacios | `POST`, `PUT` y `DELETE /api/espacios/**` | 403 | Permitido |
+| Crear una reserva | `POST /api/reservas` | Permitido | 403 |
+| Ver las reservas propias | `GET /api/reservas/mias` | Permitido | 403 |
+| Buscar espacios disponibles | `GET /api/reservas/disponibilidad` | Permitido | 403 |
+| Cancelar una reserva | `PATCH /api/reservas/{id}/cancelar` | Solo el dueño (RN7) | 403 |
+| Ver todas las reservas | `GET /api/reservas` | 403 | Permitido |
+| Aprobar o rechazar un evento | `PATCH /api/reservas/{id}/aprobar` y `/rechazar` | 403 | Permitido |
+| Cualquier otra ruta, incluido Swagger | `anyExchange().denyAll()` | 403 | 403 |
+
+"Permitido" significa que el gateway deja pasar el pedido. Después puede fallar por otra causa, como una regla de negocio (422).
+
+Hay dos niveles de autorización:
+
+- **Por rol, en el gateway:** solo mira la ruta, el método y el rol.
+- **Por dueño, en ms-reservas:** el gateway no sabe de quién es la reserva 7. ms-reservas compara `X-Usuario` con el dueño guardado (RN7).
+
+### Comportamiento ante accesos no autorizados
+
+| Situación | Quién rechaza | Respuesta | ¿Llega al microservicio? |
+|---|---|---|---|
+| Sin token, o con token mal formado, modificado, vencido o de otro emisor | Gateway | **401**, sin cuerpo y con `WWW-Authenticate` | No |
+| Token válido, pero el rol no puede usar esa ruta | Gateway | **403**, sin cuerpo | No |
+| Token válido en una ruta no contemplada | Gateway (`denyAll`) | **403**, sin cuerpo | No |
+| Rol correcto, pero la reserva es de otro usuario | ms-reservas (RN7) | **403** con `ApiResponse` y `success: false` | Sí, no modifica nada |
+| El cliente manda `X-Usuario` a mano | Gateway | No se rechaza: se ignora y se pisa con el usuario del token | Sí, con el usuario real |
+
+Un rechazo nunca cambia datos. Los 401 y 403 del gateway no tienen `ApiResponse` porque se cortan antes de llegar a los servicios (T64).
+
+### Cómo se comprueba
+
+Se necesita Keycloak, los dos microservicios y el gateway corriendo. Los pedidos siempre van por `http://localhost:8080`, y el token se pide a `localhost:8180`: con otro host, el `iss` no coincide y da 401. El token dura 5 minutos (el valor por defecto de Keycloak), así que conviene pedirlo justo antes de probar.
+
+En Postman, cada usuario tiene un request de login que guarda `access_token` en una variable de entorno. Con `curl`, desde Git Bash:
+
+```bash
+TOKEN=$(curl -s http://localhost:8180/realms/campus/protocol/openid-connect/token -d grant_type=password -d client_id=campus-api -d username=usuario1 -d password=usuario1 | sed -E 's/.*"access_token":"([^"]+)".*/\1/')
+```
+
+**Acceso permitido:** usuario1 lista los espacios y recibe 200 con la lista en `responseValue`.
+
+```bash
+curl -i http://localhost:8080/api/espacios -H "Authorization: Bearer $TOKEN"
+```
+
+**Acceso rechazado por autenticación:** el mismo pedido, sin token, recibe 401.
+
+```bash
+curl -i http://localhost:8080/api/espacios
+```
+
+**Acceso rechazado por autorización:** usuario1 intenta crear un espacio y recibe 403. No hace falta mandar un cuerpo, porque el gateway corta antes de que llegue a ms-espacios.
+
+```bash
+curl -i -X POST http://localhost:8080/api/espacios -H "Authorization: Bearer $TOKEN"
+```
+
+Para la demo completa alcanza con mostrar estos casos:
+
+| Caso | Esperado | Qué demuestra |
+|---|---|---|
+| `GET /api/espacios` con usuario1 | 200 | Acceso permitido |
+| `GET /api/espacios` sin token | 401 | Autenticación |
+| Token con un carácter modificado | 401 | La firma protege el contenido |
+| `POST /api/espacios` con usuario1 | 403 | Autorización por rol |
+| `POST /api/espacios` con admin1 | 201 | El mismo recurso, con el rol correcto |
+| `PATCH /api/reservas/{id}/cancelar` de usuario1 con usuario2 | 403 con `ApiResponse` | Autorización por dueño (RN7) |
+| `POST /api/reservas` con usuario1 y `X-Usuario: usuario2` | 201 a nombre de usuario1 | No se puede suplantar a otro usuario |
+
+La tabla 7.4 del plan completa, con sus resultados, está en T65.
+
+### Límites conocidos
+
+- **La trusted zone depende de Docker Compose:** si los servicios corren desde el IDE, los puertos 8081 y 8082 quedan abiertos y se puede entrar sin pasar por el gateway, con un `X-Usuario` inventado. La protección es real recién cuando los servicios están en Compose sin publicar puertos (fase 4).
+- **Sin HTTPS:** Keycloak corre con `start-dev` y el token viaja por HTTP. Sirve para desarrollo, no para producción.
+- **Un token no se puede revocar:** como el gateway lo valida solo, sin consultar a Keycloak, un token robado sirve hasta que vence. Por eso conviene que duren poco.
 
 ---
 
@@ -622,6 +1502,7 @@ Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las
 - **Descartamos:**
   - Las columnas `ENUM` nativas: rompen la extensibilidad.
   - La propiedad `hibernate.type.prefer_native_enum_types=false`: la probamos y, con H2, no cambió el tipo de columna.
+- **Corrección:** esto no alcanza para que una base existente acepte un valor nuevo, por el `CHECK` que crea Hibernate (T68).
 
 **T19. `@ElementCollection` para equipamiento y actividades**
 - **Decisión:** los conjuntos de enums se guardan en tablas aparte (`espacio_equipamiento` y `espacio_actividades`) que maneja Hibernate.
@@ -770,6 +1651,7 @@ Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las
 - **Decisión:** `estado` y `actividad` llevan `@JdbcTypeCode(SqlTypes.VARCHAR)`.
 - **Por qué:** mismo problema que T18: H2 crearía columnas `ENUM(...)` con la lista fija, y `ddl-auto: update` no las amplía. Si se agrega un estado (el plan menciona FINALIZADA como posible mejora) o una actividad, la base lo rechazaría. Lo verificamos: las dos columnas quedaron `CHARACTER VARYING`.
 - **Descartamos:** dejar el comportamiento por defecto, que obligaría a borrar la base para agregar un valor.
+- **Corrección:** las columnas son `CHARACTER VARYING`, pero una base existente sigue rechazando un valor nuevo por el `CHECK` (T68).
 
 **T44. `AgendaEspacio` solo con `@Getter`, sin setters**
 - **Decisión:** a diferencia de `Reserva` (`@Data`), la agenda no tiene setters.
@@ -857,3 +1739,70 @@ Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las
   - Cancelar dos veces → 409; espacio 999 → 404; equipamiento PILETA → 422; sin header → 400; estado inválido → 400.
   - **ms-espacios apagado:** crear y buscar → 503; `GET /mias` → 200, con los nombres de los espacios (D11).
 - **Lo que no corrimos acá:** RN4 con lluvia (`CLIMA_UMBRAL=0`). Ya está probado en ms-espacios (T42), y ms-reservas solo reenvía su motivo.
+
+### Gateway y seguridad
+
+**T60. El gateway usa Spring Cloud 2025.1.4 y el starter `gateway-server-webflux`**
+- **Decisión:** lo que genera Initializr para Boot 4.1.2 con "Reactive Gateway": Spring Cloud 2025.1.4 (el plan dice 2025.1.x) y la dependencia `spring-cloud-starter-gateway-server-webflux`.
+- **Por qué:** Spring Cloud Gateway 5 renombró el starter (antes era `spring-cloud-starter-gateway`). Tomar lo que da Initializr asegura nombres y versiones compatibles con Boot 4.1.
+
+**T61. Un microservicio apagado da 503 en el gateway, no 500**
+- **Decisión:** un `GlobalFilter` (`ServicioNoDisponibleFilter`) atrapa el error de conexión (`ConnectException`) y responde 503 con el formato de `ApiResponse`: "El servicio no está disponible. Intentá más tarde."
+- **Por qué:** al probar con ms-espacios apagado, `GET /api/espacios` por el gateway respondía **500 Internal Server Error**. Un 500 dice "hay un bug"; lo que pasa es que una dependencia no responde, que es exactamente lo que significa 503 (D25).
+- **Descartamos:** un circuit breaker (Resilience4j), que el plan deja afuera (D4).
+
+**T62. Timeouts en el gateway: 2 s para conectar y 10 s para la respuesta**
+- **Decisión:** `spring.cloud.gateway.server.webflux.httpclient.connect-timeout: 2000` y `response-timeout: 10s`.
+- **Por qué:** por defecto el gateway no tiene timeout de respuesta: si un servicio queda colgado, el cliente espera para siempre. Lo probamos con un servidor que acepta la conexión y nunca contesta: a los 10 segundos, **504 Gateway Timeout**. Son 10 y no 3 porque una reserva puede encadenar dos llamadas (ms-reservas → ms-espacios → Open-Meteo), cada una con sus propios timeouts.
+- **Limitación conocida:** si Open-Meteo está **lento** (no caído), ms-espacios puede tardar hasta 5 s (2 de conexión y 3 de lectura), pero ms-reservas corta a los 3 s y responde "El servicio de espacios no está disponible" en vez de "no se pudo verificar el clima". Se resolvería con un timeout de lectura más largo en ms-reservas. Con Open-Meteo caído (lo que mostramos en la demo) el mensaje es el correcto, porque la conexión falla al instante.
+
+**T63. El gateway no depende de `campus-commons`**
+- **Decisión:** el 503 del gateway arma el JSON con el mismo formato de `ApiResponse`, pero a mano.
+- **Por qué:** el JAR común está pensado para los microservicios Spring MVC (su `GlobalExceptionHandler` es un `@RestControllerAdvice` de MVC). El gateway es reactivo y solo necesita un mensaje fijo.
+
+**T64. El 401 y el 403 del gateway no tienen cuerpo**
+- **Decisión:** dejamos las respuestas por defecto de Spring Security: el código, sin `ApiResponse`.
+- **Por qué:** el código ya dice todo (no autenticado o sin permiso), y Spring agrega el header `WWW-Authenticate` con el detalle, que es el estándar de OAuth 2. Es lo que usamos como argumento en T11: hay respuestas que no tienen nuestro cuerpo, y por eso el código HTTP va en la línea de estado.
+
+**T65. Verificamos la tabla 7.4 del plan entrando por el gateway**
+- **Decisión:** con Keycloak, los dos servicios y el gateway corriendo, y tokens reales de `usuario1`, `usuario2` y `admin1`, probamos todos los casos. Todos dieron el código esperado:
+  - `GET /api/espacios` sin token → 401; con usuario1 → 200.
+  - `POST /api/espacios` con usuario1 → 403; con admin1 → 201.
+  - `GET /api/reservas/disponibilidad` con usuario1 → 200.
+  - `POST /api/reservas` con usuario1 → 201, con `"usuario": "usuario1"` **aunque mandó `X-Usuario: usuario2`** a mano.
+  - `GET /api/reservas` con usuario1 → 403; con admin1 → 200.
+  - Token modificado a mano → 401.
+  - `PATCH .../aprobar` con usuario1 → 403; con admin1 → 200.
+  - `GET /api/reservas?estado=PENDIENTE` con admin1 → 200.
+- **Extras:** usuario2 cancela la de usuario1 → 403 (lo decide ms-reservas, RN7); admin1 intenta reservar → 403; ruta inexistente → 403 (`denyAll`); ms-espacios apagado → 503 (T61), y `GET /api/reservas/mias` sigue en 200.
+
+### Persistencia
+
+**T67. El DER sale del esquema real, no de las entidades**
+- **Decisión:** leímos columnas, claves y restricciones de `INFORMATION_SCHEMA`, en copias de las dos bases y en bases recién creadas por Hibernate. Las relaciones entre bases van punteadas.
+- **Por qué:** el enunciado exige que los diagramas coincidan con lo implementado, y varias cosas no se ven en el código Java: las `UNIQUE` de los `Set`, los `CHECK` de los enums y qué columnas son `NOT NULL`. La línea punteada muestra que esas relaciones no las controla la base.
+- **Descartamos:** dibujar FK entre `reservas` y `espacios`, porque no existen. También un DER por microservicio: un solo diagrama muestra la frontera entre las bases.
+
+**T68. Los enums tienen un `CHECK` en la base, y lo dejamos así**
+- **Decisión:** no cambiamos el código. Documentamos que, para agregar un valor a un enum en una base existente, hay que borrar `data/` o eliminar el `CHECK`. Corrige lo que decían T18 y T43.
+- **Por qué:** `@JdbcTypeCode(SqlTypes.VARCHAR)` cambia el tipo de la columna, pero Hibernate igual crea, por ejemplo, `"TIPO" IN('AULA', 'LABORATORIO', 'SALA', 'CANCHA')`. Lo probamos en una copia del proyecto: con `AUDITORIO` en el enum, `ddl-auto: update` no amplió el `CHECK` y el `INSERT` falló; en una base nueva, la lista ya incluía `AUDITORIO`. Para el TP alcanza: las bases son locales y `DatosIniciales` recarga los espacios. Además, el `CHECK` protege contra valores inválidos.
+- **Descartamos:** cambiar el mapeo solo para quitar el `CHECK`, porque no es parte de ninguna regla del TP y habría que volver a probar las entidades. El argumento del Strategy sigue siendo válido para el código: el service no cambia.
+
+### Arquitectura
+
+**T66. El C2 final actualiza tres detalles del diagrama de la Entrega 1**
+- **Decisión:** separamos `Usuarios` en `Usuario` y `Administrador`, escribimos `HTTP/JSON` en vez de `HTTPS/JSON` para las llamadas al gateway y sacamos Swagger como cliente. Además, `X-Usuario` aparece en las dos rutas. Los nombres de los contenedores no cambian.
+- **Por qué:** así coincide con los actores del C1 y con lo que hace el sistema. `localhost:8080` y Keycloak en `start-dev` usan HTTP sin certificado; el gateway solo rutea `/api/espacios/**` y `/api/reservas/**`, por lo que en Docker Swagger no queda accesible; y `UsuarioHeaderFilter` es global. La Entrega 1 ya aclaraba que la versión final iba a reflejar lo desplegado.
+- **Descartamos:** dejar `HTTPS` en el diagrama, porque describe producción y no nuestro despliegue.
+
+### Documentación
+
+**T66. Ajustamos el C1 de la Entrega 1 a lo implementado**
+- **Decisión:** los pedidos al sistema pasan de `HTTPS/JSON + JWT` a `HTTP/JSON + JWT`; "Valida los tokens" pasa a "Obtiene las claves públicas para validar los JWT"; acortamos las descripciones del C1 y reordenamos la disposición para que las líneas no se crucen.
+- **Por qué:** el enunciado exige que los diagramas coincidan con lo desplegado. El gateway y Keycloak corren por HTTP, y la validación del JWT la hace nuestro sistema, no Keycloak: de Keycloak solo baja las claves.
+- **Descartamos:** dibujar el gateway o Postman en el C1. El gateway es interno (va en el C2) y Postman es solo una herramienta de prueba (D24).
+
+**T69. La Sección 04 numera funcionalidades y pasos, y usa un diagrama de actividades con carriles**
+- **Decisión:** agregamos los identificadores F1 a F9 y P1 a P16, mantenemos RN1 a RN15 y dibujamos el proceso con carriles en PlantUML. La prioridad es Alta si el proceso principal no se puede completar sin esa funcionalidad.
+- **Por qué:** la consigna pide identificadores y prioridad, que la Entrega 1 no tenía, y relacionar funcionalidades y reglas con los pasos. Los carriles muestran quién hace cada paso y dónde colaboran los servicios. PlantUML es la misma herramienta del C1 y el C2.
+- **Descartamos:** un diagrama de secuencia, porque muestra bien los mensajes, pero peor las decisiones y el recorrido completo; y BPMN, porque sumaba una herramienta sin aportar información.
