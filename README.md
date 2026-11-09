@@ -226,7 +226,7 @@ En PowerShell, `sh` no existe; se llama al bash de Git:
 docker compose up -d --build
 ```
 
-Levanta cuatro contenedores: `keycloak`, `ms-espacios`, `ms-reservas` y `api-gateway`. Keycloak tarda entre 20 y 40 segundos en arrancar y los servicios Spring entre 10 y 20. Conviene esperar unos 40 segundos antes de empezar la demo: si recién levantado algún pedido da 503 o 401, es que todavía están arrancando.
+Levanta cuatro contenedores: `keycloak`, `ms-espacios`, `ms-reservas` y `api-gateway`.
 
 | Puerto | Qué |
 |---|---|
@@ -259,8 +259,6 @@ docker compose down    # apaga y borra los contenedores: la próxima vez arranca
 ```
 
 Las bases H2 viven dentro de cada contenedor, así que `down` deja el sistema como recién instalado.
-
-> **Modo local (para desarrollar):** se puede dejar solo Keycloak en Docker (`docker compose up -d keycloak`) y correr cada servicio desde el IDE o con `./mvnw spring-boot:run`. En ese modo los microservicios sí publican sus puertos y tienen Swagger en `http://localhost:8081/swagger-ui.html` y `http://localhost:8082/swagger-ui.html`.
 
 ---
 
