@@ -1,0 +1,25 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          httpclient:
+            # Máximo para conectar con un microservicio (ms); sin esto Netty espera 30 s (T70)
+            connect-timeout: 2000
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # El emisor que exigimos en el token: Postman lo pide a localhost:8180
+          issuer-uri: http://localhost:8180/realms/campus
+          # De dónde se bajan las claves públicas; en Docker se cambia por keycloak:8080
+          jwk-set-uri: ${JWK_SET_URI:http://localhost:8180/realms/campus/protocol/openid-connect/certs}
+
+campus:
+  ms-espacios-url: ${MS_ESPACIOS_URL:http://localhost:8081}
+  ms-reservas-url: ${MS_RESERVAS_URL:http://localhost:8082}

@@ -89,6 +89,7 @@ Ideas clave por si repreguntan:
 - **Por qué una clase por situación y no una sola con el código:** el handler elige el código por el **tipo** de la excepción, y el service expresa *qué pasó* (un conflicto, una regla) sin saber nada de HTTP.
 - **422 vs. 400:** 400 es "el pedido está mal formado" (falta un campo, una fecha que no es fecha). 422 es "está bien formado, pero una regla de negocio no lo permite".
 - **409 vs. 422:** 409 es un choque con el **estado actual** del recurso (otra reserva ya ocupa la franja, la reserva ya está cancelada). Con otro estado, el mismo pedido podría pasar. 422 es que el pedido en sí viola una regla, sin importar el estado (50 personas en un aula para 40).
+- **500 vs. 503:** los dos son errores del servidor, pero dicen cosas distintas. 500 es "algo se rompió adentro": un bug nuestro (un `NullPointerException`, un caso no previsto), reintentar no sirve y el log lo marca con ERROR y el stack trace (T10). 503 es "ahora no puedo atenderte": no hay ningún bug, falla algo de lo que dependemos (ms-espacios, Open-Meteo), es temporal y reintentar más tarde sí sirve. Por eso nunca respondemos 500 por una dependencia caída: el código HTTP ya le dice al cliente si el problema es nuestro o externo, y si tiene sentido reintentar.
 - **403 acá vs. 403 del gateway:** el gateway da 403 cuando el **rol** no alcanza. Esta excepción es para cuando el rol está bien, pero el recurso no es tuyo (RN7). Eso solo lo sabe `ms-reservas`.
 - **`super(mensaje)`:** guarda el mensaje en la excepción; el handler lo recupera con `getMessage()` y lo pone en el `message` del `ApiResponse`.
 
@@ -107,7 +108,10 @@ Ideas clave por si repreguntan:
 - **Los otros cuatro 400:** parámetro obligatorio que falta, parámetro que no se puede convertir (`actividad=NADAR`), JSON ilegible o con un enum inválido, y header obligatorio que falta (`X-Usuario`). Sin estos handlers, Spring responde 400 con su propio formato y sin explicar qué está mal (T37 y T57).
 - **`UNPROCESSABLE_CONTENT` y no `UNPROCESSABLE_ENTITY`:** es el mismo 422. Spring 7 renombró la constante siguiendo la especificación HTTP actual (RFC 9110) y marcó la vieja como *deprecated*. El plan usa el nombre viejo.
 - **Por qué el `pom.xml` también tiene `spring-context`:** `MethodArgumentNotValidException` está en `spring-web`, pero hereda de `BindException` y devuelve un `BindingResult`, que están en `spring-context` (paquete `org.springframework.validation`). `spring-web` no trae `spring-context`, así que sin esa dependencia no compila ("cannot access org.springframework.validation.BindException"). Va `provided` por el mismo motivo que `spring-web`: los microservicios ya lo tienen.
-- **Excepciones no previstas (500):** si salta una que no tiene handler (por ejemplo, un `NullPointerException`), Spring responde 500 con su formato por defecto. No la atrapamos a propósito: un 500 indica un bug que hay que corregir, no un error de negocio.
+- **Excepciones no previstas (500):** el método `inesperado`, con `@ExceptionHandler(Exception.class)`, atrapa todo lo que no tiene un handler propio. Si es una excepción de Spring que ya sabe su código (una ruta que no existe → 404, un método no permitido → 405), lo conserva. Si es un error nuestro (por ejemplo, un `NullPointerException`), responde **500** "Error interno del servidor", con nuestro `ApiResponse`, y escribe el stack trace completo en el log con nivel ERROR. Sigue siendo un 500 a propósito: indica un bug que hay que corregir, no un error de negocio (T10).
+- **`ErrorResponse`:** es la interfaz que implementan las excepciones de Spring MVC que saben su propio código HTTP (`NoResourceFoundException`, `HttpRequestMethodNotSupportedException`…). Con `ex instanceof ErrorResponse er` se pregunta eso y, en el mismo paso, se la usa para leer el código y el detalle.
+- **Por qué el 500 no muestra el mensaje real:** el detalle de un error interno (un `NullPointerException`, un nombre de tabla) no le sirve al cliente y puede mostrar cómo está hecho el sistema por dentro. Por eso el mensaje es genérico, y el detalle queda en el log para nosotros.
+- **El handler también loguea:** ver la sección "Logs".
 
 **Sección 09 de la entrega: librería común**
 
@@ -331,6 +335,9 @@ Ideas clave por si repreguntan:
 - **Controller sin `try/catch` ni lógica:** solo traduce HTTP ↔ service. Si mañana la API fuera por otro medio, el service no cambiaría.
 - **Swagger UI** (`/swagger-ui.html`): springdoc lee los controllers (rutas, parámetros, records y anotaciones) y genera la especificación OpenAPI en `/v3/api-docs`. Swagger UI la muestra como página para probar la API.
 - **`@Tag`** agrupa los endpoints en Swagger; **`@Operation`** describe cada uno. En la descripción pusimos los códigos de error posibles.
+- **`@ResponseStatus(HttpStatus.CREATED)` en el POST:** springdoc arma la documentación leyendo el código, sin ejecutarlo. Ve que el método devuelve un `ResponseEntity`, pero no con qué código: eso se decide recién al correr `ResponseEntity.status(...)`. Sin la anotación, Swagger mostraba 200 para un endpoint que responde 201 (T74).
+- **`@OpenAPIDefinition(info = @Info(...))`** en `MsEspaciosApplication`: el título, la versión y la descripción que Swagger muestra arriba de todo. Sin esto dice "OpenAPI definition v0".
+- **Swagger se ve en modo local:** en Docker los microservicios no publican puertos (trusted zone), así que su Swagger no es accesible desde afuera. Para mostrarlo se levanta el servicio desde el IDE (sección 6 de la guía).
 - **Errores 400 de formato:** un parámetro que falta, un valor que no se puede convertir (`actividad=NADAR`, `id=abc`, una fecha mal escrita) o un JSON roto también salen con `ApiResponse` y un mensaje claro, gracias a tres handlers más en el JAR común (T37).
 
 **`DatosIniciales`**
@@ -1396,6 +1403,241 @@ La tabla 7.4 del plan completa, con sus resultados, está en T65.
 
 ---
 
+## Fase 3: api-gateway
+
+**Qué es el gateway y por qué existe**
+
+> "Es la única puerta de entrada al backend (D5). El cliente le habla solo al gateway, en el puerto 8080, y el gateway decide a qué microservicio va cada pedido según el path: `/api/espacios/**` a ms-espacios y `/api/reservas/**` a ms-reservas. Además concentra la seguridad (D6): valida el JWT de Keycloak (si no es válido, 401) y controla que el rol pueda usar esa ruta (si no, 403). Los microservicios no publican puertos, así que solo reciben pedidos que ya pasaron por este control. Es lo que vimos en el apunte 19."
+
+**¿Por qué el gateway tiene tan poco código?**
+
+> "Porque casi todo el trabajo lo hacen Spring Cloud Gateway y Spring Security; nosotros solo declaramos qué queremos. Con tres clases decimos las dos rutas, las reglas por rol y cómo leer los roles de Keycloak, y agregamos el header del usuario. Lo que no escribimos, pero pasa en cada pedido, es mucho: leer el header `Authorization`, bajar y guardar las claves públicas de Keycloak, verificar la firma RSA del JWT, controlar el emisor y el vencimiento, responder 401 o 403, buscar la ruta que coincide, abrir la conexión con el microservicio, reenviar el pedido con sus headers y su cuerpo, y devolver la respuesta. Que sea poco código es la idea: la seguridad queda en un lugar chico, fácil de leer y de revisar, y no repetida en cada servicio (D6)."
+
+**Cómo se creó el proyecto y qué tiene el `pom.xml`**
+
+> "Lo generamos con Spring Initializr igual que los microservicios: Maven, Java 25, Spring Boot 4.1.2 y el paquete `ar.edu.utn.frc.bda.campus.gateway`. Tiene solo dos dependencias: **Reactive Gateway**, que hace el ruteo, y **OAuth2 Resource Server**, que valida el JWT. Como el gateway es parte de Spring Cloud y no de Spring Boot, el `pom.xml` además importa la BOM de Spring Cloud (`spring-cloud-dependencies` 2025.1.4), que fija las versiones de todo lo de Spring Cloud compatibles con Boot 4.1. No tiene base de datos, ni controllers, ni Lombok: no guarda nada y no tiene lógica de negocio, solo rutea y controla el acceso. Del JAR común usa solo `ApiResponse`, para responder el 503 cuando un servicio no responde (lo sumamos en la Fase 4, T61)."
+
+Las dependencias, una por una:
+
+| Dependencia | Para qué la usamos |
+|---|---|
+| `spring-cloud-starter-gateway-server-webflux` | Spring Cloud Gateway en su versión **reactiva** (WebFlux sobre Netty). Trae el `RouteLocator` para declarar las rutas, los filtros (`GlobalFilter`) para modificar pedidos, y el cliente HTTP que reenvía cada pedido al microservicio. |
+| `spring-boot-starter-security-oauth2-resource-server` | Spring Security + soporte de **Resource Server**: lee el header `Authorization: Bearer <jwt>`, baja las claves públicas de Keycloak, verifica la firma, el emisor (`iss`) y el vencimiento (`exp`), y arma el usuario autenticado con sus roles. Es lo que usa nuestro `SecurityWebFilterChain`. |
+| `campus-commons` (agregada a mano) | Nuestro JAR común, solo por `ApiResponse`: el formato del 503 de `ServicioCaidoFilter` (T61). |
+| `spring-boot-starter-security-oauth2-resource-server-test` (test) | Utilidades para probar la seguridad sin Keycloak (por ejemplo, simular un JWT con un rol). Solo se usa en los tests. |
+| `reactor-test` (test) | Herramientas para probar código reactivo (`Mono`, `Flux`), como `StepVerifier`. Solo se usa en los tests. |
+| BOM `spring-cloud-dependencies` (en `dependencyManagement`) | No agrega ninguna librería: solo fija las versiones de Spring Cloud. Por eso la dependencia del gateway va **sin** `<version>`. |
+
+Ideas clave por si repreguntan:
+
+- **Resource Server:** en OAuth2, es el servidor que tiene los recursos (la API) y los protege pidiendo un token. El que emite el token es el Authorization Server, que en nuestro caso es Keycloak. El gateway no hace login ni guarda contraseñas: solo verifica tokens que emitió otro.
+- **Por qué reactivo (WebFlux):** un gateway pasa casi todo su tiempo esperando respuestas de otros servicios. El modelo reactivo atiende muchos pedidos con pocos hilos, sin dejar un hilo bloqueado por cada pedido en espera. Por eso el gateway corre sobre **Netty** y no sobre Tomcat, como los microservicios.
+- **Consecuencia del modelo reactivo:** la seguridad se configura con `ServerHttpSecurity` y `SecurityWebFilterChain` (las versiones reactivas), y los filtros devuelven `Mono<Void>` en vez de ejecutarse en un hilo propio.
+- **Dos BOMs:** el parent `spring-boot-starter-parent` fija las versiones de Spring Boot; la BOM `spring-cloud-dependencies` fija las de Spring Cloud. Cada versión de Spring Cloud es compatible con una línea de Boot: la 2025.1.x va con Boot 4.0 y 4.1 (la 2026.0 será para Boot 4.2).
+- **`<spring-cloud.version>` en `properties`:** Initializr deja la versión en una propiedad para cambiarla en un solo lugar.
+- **`spring-boot-maven-plugin`:** igual que en los microservicios, arma el JAR ejecutable (`java -jar api-gateway.jar`).
+- **Puerto 8080:** es el único puerto de la aplicación que se publica en Docker, además del de Keycloak (8180).
+
+**`application.yaml`**
+
+> "Es la configuración del gateway, y tiene cuatro partes. El puerto 8080. El tiempo máximo para conectarse con un microservicio, 2 segundos. La configuración del Resource Server, con dos URLs de Keycloak: `issuer-uri`, el emisor que exigimos que diga el token, y `jwk-set-uri`, de donde bajamos las claves públicas para verificar la firma. Y nuestras propiedades propias con las URLs de los dos microservicios, que usa el `RouteLocator` para saber a dónde reenviar cada pedido. Igual que en los microservicios, lo que cambia entre el IDE y Docker se puede pisar con una variable de entorno."
+
+Ideas clave por si repreguntan:
+
+- **Reemplaza a `application.properties`:** Initializr genera un `.properties`; lo cambiamos por `.yaml`, como en los otros servicios. Son equivalentes (`spring.application.name=api-gateway` es lo mismo que el anidado del YAML), pero el YAML se lee mejor cuando hay muchas propiedades con el mismo prefijo, como las de `spring.security.oauth2...`.
+- **`issuer-uri: http://localhost:8180/realms/campus`:** el gateway rechaza (401) cualquier token cuyo claim `iss` no sea exactamente este. Así no acepta tokens emitidos por otro realm u otro Keycloak, aunque estén bien firmados.
+- **`jwk-set-uri`:** la dirección del JWK Set, el documento público donde Keycloak publica sus claves. Con la clave pública el gateway verifica que la firma la hizo Keycloak con su clave privada, sin preguntarle a Keycloak por cada pedido: baja las claves una vez y las guarda.
+- **Por qué dos URLs y no una (sección 7.3 del plan):** el token que pide Postman dice `iss: http://localhost:8180/...`, porque Postman habló con `localhost:8180`. Pero dentro de Docker el gateway llega a Keycloak como `http://keycloak:8080`. Entonces el emisor queda fijo en `localhost:8180` (lo que dice el token), y solo cambia la dirección desde donde se bajan las claves, con la variable `JWK_SET_URI` en el `docker-compose.yml` (Fase 4).
+- **Si solo pusiéramos `issuer-uri`:** Spring buscaría las claves en `localhost:8180` también desde Docker, donde `localhost` es el propio contenedor del gateway, y no las encontraría.
+- **`campus.ms-espacios-url` y `campus.ms-reservas-url`:** propiedades nuestras (el prefijo `campus` lo inventamos, como en los microservicios, T15). Desde el IDE, cada servicio está en `localhost`; en Docker valen `http://ms-espacios:8081` y `http://ms-reservas:8082`, el nombre de cada servicio en la red interna.
+- **`spring.cloud.gateway.server.webflux.httpclient.connect-timeout: 2000`:** cuántos milisegundos espera el gateway para abrir la conexión con un microservicio. Sin esto usa el de Netty, que es de 30 segundos: con ms-espacios caído, el usuario esperaba medio minuto para recibir el 503. Con 2 segundos queda igual que el `EspaciosClient` de ms-reservas (T70).
+- **`spring.application.name`:** el nombre de la aplicación; aparece en los logs (`[api-gateway]`). Lo dejamos, como en los microservicios, aunque el bloque original del plan no lo tenía.
+
+**`GatewayConfig`: las rutas**
+
+> "Define las dos rutas del gateway con un `RouteLocator`, como en el apunte 19. Cada ruta tiene un id, un predicado y un destino: si el path del pedido empieza con `/api/espacios/`, se reenvía a ms-espacios; si empieza con `/api/reservas/`, a ms-reservas. El path no cambia: `GET /api/espacios/3` en el gateway llega como `GET /api/espacios/3` al microservicio. Las direcciones de los servicios no están escritas en el código: vienen del `application.yaml`, así que el mismo código sirve en el IDE y en Docker."
+
+Ideas clave por si repreguntan:
+
+- **`@Configuration` + `@Bean`:** la clase es de configuración, y el método `rutas` crea un objeto que Spring guarda y usa. El gateway busca todos los beans `RouteLocator` y arma su tabla de rutas con ellos.
+- **`RouteLocatorBuilder`:** lo inyecta Spring Cloud Gateway; es un constructor de rutas con una API fluida (`routes().route(...).route(...).build()`).
+- **`@Value("${campus.ms-espacios-url}")`:** inyecta el valor de la propiedad como parámetro del método. Si la propiedad no existe, la aplicación no arranca: es mejor fallar al inicio que rutear a cualquier lado.
+- **`r.path("/api/espacios/**")`:** el *predicado*, la condición que tiene que cumplir el pedido. `**` coincide con cualquier cantidad de segmentos, también con ninguno: matchea `/api/espacios`, `/api/espacios/3` y `/api/espacios/3/validacion`.
+- **`.uri(espacios)`:** el destino. Solo se toma el esquema, el host y el puerto (`http://localhost:8081`); el path y los parámetros del pedido original se mantienen.
+- **El id (`"espacios"`, `"reservas"`):** sirve para identificar la ruta en los logs y en las herramientas de diagnóstico.
+- **Qué no hace esta clase:** no decide quién puede entrar. El ruteo y la seguridad están separados: la seguridad la aplica antes el `SecurityWebFilterChain`, y un pedido que no pasa ni siquiera llega a rutearse.
+- **Por qué en Java y no en el YAML:** Spring Cloud Gateway también acepta las rutas en `spring.cloud.gateway.server.webflux.routes`. Elegimos el `RouteLocator` porque es lo que muestra el apunte 19 y el plan, y porque un error de tipeo da error de compilación en vez de una ruta que no anda.
+
+**`SecurityConfig`: el Security Filter**
+
+> "Es la seguridad de todo el sistema, en un solo lugar (D6). Hace dos controles distintos. Primero **autentica**: el pedido tiene que traer un JWT válido, firmado por Keycloak, con nuestro emisor y sin vencer; si no, 401. Después **autoriza**: según el método y el path, el rol del usuario tiene que estar permitido; si no, 403. Las reglas son: ver espacios, cualquiera de los dos roles; crear, modificar o borrar espacios, solo ADMIN; ver todas las reservas y aprobar o rechazar eventos, solo ADMIN; crear, ver las propias, cancelar y buscar disponibles, solo USUARIO; y cualquier otra cosa, denegada. Como Keycloak manda los roles en un claim propio (`realm_access.roles`), escribimos un convertidor que los transforma en el formato que entiende Spring (`ROLE_USUARIO`, `ROLE_ADMIN`)."
+
+Ideas clave por si repreguntan:
+
+- **401 vs. 403:** 401 *Unauthorized* es "no sé quién sos" (falta el token, está vencido, la firma no coincide o el emisor no es el nuestro). 403 *Forbidden* es "sé quién sos, pero no podés hacer esto" (el token es válido y el rol no alcanza).
+- **`@EnableWebFluxSecurity` y `ServerHttpSecurity`:** son las versiones **reactivas** de Spring Security, porque el gateway es WebFlux (T60). En un servicio MVC serían `@EnableWebSecurity` y `HttpSecurity`.
+- **`SecurityWebFilterChain`:** la cadena de filtros de seguridad que se aplica a **cada** pedido antes de rutearlo. Es el "Security Filter" del apunte.
+- **`csrf(...disable)`:** CSRF es un ataque que aprovecha las cookies de sesión que el navegador manda solo. Nuestra API no usa cookies ni sesión: el token viaja en un header que el atacante no puede hacer que el navegador agregue. Por eso la protección no aplica, y si la dejáramos, rechazaría todos los `POST`, `PUT`, `PATCH` y `DELETE`.
+- **El orden de las reglas importa:** Spring aplica **la primera que coincide**. Por eso `GET /api/espacios/**` (los dos roles) va antes que `/api/espacios/**` (solo ADMIN): si estuviera al revés, un USUARIO no podría ni listar espacios.
+- **`"/api/reservas"` sin `/**`:** coincide solo con el listado general (`GET /api/reservas` y `GET /api/reservas?estado=...`, porque los parámetros no forman parte del path). `GET /api/reservas/mias` no coincide, y cae en la regla de USUARIO.
+- **`"/api/reservas/*/aprobar"`:** `*` es exactamente **un** segmento (el id). `**` serían cualquier cantidad.
+- **`anyExchange().denyAll()`:** todo lo que no está en la lista se rechaza. Es una lista blanca: si mañana se agrega un endpoint y nadie escribe su regla, queda cerrado, no abierto.
+- **`hasRole("ADMIN")` busca `ROLE_ADMIN`:** Spring agrega el prefijo `ROLE_` al comparar. Por eso el convertidor les pone ese prefijo a los roles de Keycloak.
+- **Por qué existe ese prefijo:** Spring Security guarda todos los permisos del usuario en una sola lista de *authorities*, que son simples textos. Ahí pueden convivir cosas distintas: roles (`ROLE_ADMIN`), scopes de OAuth2 (`SCOPE_profile`) o permisos sueltos (`reservas:aprobar`). El prefijo es la convención para saber cuáles de esos textos son **roles**. `hasRole("ADMIN")` es solo un atajo de `hasAuthority("ROLE_ADMIN")`; incluso `hasRole("ROLE_ADMIN")` da error, porque Spring ya agrega el prefijo.
+- **Alternativa equivalente:** no poner el prefijo en el convertidor y usar `hasAuthority("ADMIN")` en las reglas. Funciona igual; elegimos `hasRole` porque es lo que usa el plan, y porque se lee mejor: en el enunciado y en Keycloak son *roles*.
+- **`oauth2ResourceServer(o -> o.jwt(...))`:** activa la validación del JWT con las dos URLs del `application.yaml` y le dice que use nuestro convertidor para sacar los roles.
+- **Por qué hace falta el convertidor:** por defecto, Spring toma los permisos del claim `scope` (y los prefija `SCOPE_`). Keycloak pone los roles del realm en `realm_access.roles`, que Spring no conoce.
+- **`instanceof Collection<?> roles`:** *pattern matching* de Java: pregunta si el valor es una colección y, si lo es, ya lo deja en la variable `roles`. Si el token no trae roles, devuelve una lista vacía y el usuario queda autenticado pero sin permisos (403 en todo).
+- **`ReactiveJwtAuthenticationConverterAdapter`:** `JwtAuthenticationConverter` es la versión común (bloqueante); el adapter lo envuelve para que devuelva un `Mono`, como espera la cadena reactiva.
+- **ADMIN no crea reservas:** la regla de `/api/reservas/**` es solo para USUARIO, como dice la tabla de roles de la Entrega 1: bedelía administra, no reserva.
+- **Los 401 y 403 salen sin cuerpo:** los genera Spring Security antes de llegar a nuestro código, así que no tienen nuestro `ApiResponse`. El código HTTP alcanza para saber qué pasó (T11).
+- **El orden del código no es el orden de ejecución:** `securityFilter` se ejecuta **una sola vez, al arrancar**, y lo que hace es *armar* la cadena de filtros; no procesa ningún pedido. En ese momento también se llama a `rolesDeKeycloak()`, que devuelve el convertidor y queda guardado adentro de la cadena. Después, **en cada pedido**, Spring Security corre sus filtros en un orden fijo, sin importar en qué orden los escribimos: primero el de **autenticación** (lee el `Bearer`, valida el JWT y, con nuestro convertidor, arma el usuario con `ROLE_USUARIO` o `ROLE_ADMIN`; si falla, 401), y recién después el de **autorización** (recorre las reglas de `authorizeExchange` y compara con esos roles; si no alcanza, 403). Que `hasRole` aparezca antes en el código que `oauth2ResourceServer` es solo el orden en que se configura, como llenar un formulario.
+- **Dónde está el método en la clase tampoco importa:** en Java, que `rolesDeKeycloak()` esté escrito abajo de `securityFilter` no cambia nada; se puede llamar a un método declarado más abajo.
+
+**`UsuarioHeaderFilter`: el header `X-Usuario`**
+
+> "Es un filtro global del gateway: se ejecuta en todos los pedidos que se rutean, después de la seguridad y antes de reenviarlos. Hace dos cosas. Primero **borra** cualquier `X-Usuario` que haya mandado el cliente, porque no se le puede creer: cualquiera podría escribir `X-Usuario: usuario1` a mano. Después saca el `preferred_username` del JWT, que ya validó el Security Filter, y lo agrega como `X-Usuario`. Así ms-reservas sabe quién reserva y quién cancela (RN7) sin tener que validar tokens (D8)."
+
+Ideas clave por si repreguntan:
+
+- **`GlobalFilter`:** un filtro de Spring Cloud Gateway que se aplica a **todas** las rutas, sin tener que agregarlo a cada una. El otro tipo, `GatewayFilter`, se agrega ruta por ruta.
+- **Por qué después de la seguridad:** el `SecurityWebFilterChain` es un filtro web que corre antes que los filtros del gateway. Cuando llega acá, el pedido ya tiene un JWT válido y un rol permitido; si no, ya se cortó con 401 o 403.
+- **Por qué primero se borra:** si el cliente manda `X-Usuario: usuario2` con el token de `usuario1`, sin el borrado usuario1 podría cancelar reservas de usuario2. Con el borrado, el único `X-Usuario` que llega es el que puso el gateway a partir del token. Lo probamos en la tabla 7.4.
+- **`exchange.mutate().request(...)`:** los pedidos en WebFlux son inmutables; para cambiar un header se arma una copia modificada del *exchange* (pedido + respuesta) y se sigue con esa.
+- **`getPrincipal()`:** devuelve el usuario autenticado, como un `Mono` porque es reactivo. Con JWT es un `JwtAuthenticationToken`, que tiene el token con todos sus claims.
+- **`filter(...isInstance).cast(...)`:** se queda solo con autenticaciones por JWT. Si por algún motivo no hubiera una, el `Mono` queda vacío.
+- **`preferred_username`:** el nombre de usuario de Keycloak (`usuario1`, `admin1`). Usamos este y no `sub`, que es un UUID: es más legible en las reservas y en los logs, y en el realm es único.
+- **`defaultIfEmpty(limpio)`:** si no hay usuario, se sigue con el pedido limpio, sin `X-Usuario`. Con nuestras reglas no pasa, porque todo exige token, pero así el filtro nunca corta un pedido por su cuenta.
+- **`flatMap(chain::filter)`:** le pasa el exchange (ya con el header) al siguiente filtro de la cadena, que termina reenviándolo al microservicio.
+- **Va en el paquete `filters`:** separado de `config`, porque no es configuración sino código que se ejecuta en cada pedido.
+
+**`ServicioCaidoFilter`: 503 si el microservicio no responde**
+
+> "Es otro filtro global del gateway, que envuelve a todos los demás. Si al reenviar el pedido el microservicio no responde, porque está apagado o su contenedor se detuvo, Spring Cloud Gateway por defecto devuelve un 500 genérico, con su propio formato. Este filtro atrapa ese error y responde **503** con nuestro `ApiResponse`, 'El servicio no está disponible', igual que hacen los microservicios cuando falla una dependencia. Además deja una línea WARN en el log con la ruta que no respondió. Así cumplimos lo que prometimos en D4 y D25: una falla de otro servicio nunca termina en un 500."
+
+Ideas clave por si repreguntan:
+
+- **Por qué importa:** el 500 que daba el gateway decía algo falso. Le avisaba al cliente "está roto, no reintentes", cuando en realidad era "el servicio no está, esperá y reintentá" (ver 500 vs. 503 en las excepciones).
+- **Cómo lo encontramos:** con todo en Docker apagamos ms-espacios (`docker compose stop ms-espacios`) y pedimos `GET /api/espacios` por el gateway: daba **500**. Crear y buscar reservas ya daban 503, porque esos pedidos pasan por ms-reservas, que traduce el error en su `EspaciosClient`. Pero listar espacios va directo del gateway a ms-espacios, y ahí nadie lo traducía.
+- **¿Por qué no alcanza con el `GlobalExceptionHandler`?** Porque está **adentro** de cada microservicio, y solo atrapa las excepciones que salen del código de ese microservicio mientras atiende un pedido: el `throw` sube (por eso son `RuntimeException`, sin `try/catch` en cada capa) hasta el controller, y el handler lo traduce. Si el contenedor de ms-espacios está apagado, no hay ningún ms-espacios corriendo, ni código, ni handler: el error pasa en **otra aplicación**, el gateway, cuando intenta conectarse y no puede. Es como un recepcionista que atiende los reclamos adentro de una oficina: si la oficina está cerrada, el que tiene que avisar "está cerrado, volvé más tarde" es el de la puerta.
+- **¿Y el resto de los errores, el gateway no los maneja?** No hace falta, porque el gateway no tiene lógica propia. Los errores posibles son tres:
+  - **Los del microservicio** (404, 409, 422, 503 de Open-Meteo...): los arma el `GlobalExceptionHandler` de cada servicio, y el gateway reenvía la respuesta tal cual, con su código y su `ApiResponse`.
+  - **Los de seguridad** (401 y 403, incluida una ruta que no existe): los decide Spring Security antes de rutear. Salen sin cuerpo: el gateway corta el pedido antes de que llegue a nuestro código.
+  - **Que el microservicio no responda:** el único error que nace en el gateway y que nadie más puede responder. Es este filtro.
+- **Por qué el handler del JAR común no se puede usar en el gateway:** es de Spring MVC (`@RestControllerAdvice` sobre servlets) y el gateway es reactivo (WebFlux, sobre Netty), así que aunque se escaneara no se aplicaría. Además, el error de conexión no sale de un controller, sino del filtro que reenvía el pedido.
+- **`implements GlobalFilter, Ordered` y `getOrder()`:** `Ordered` le dice al gateway en qué lugar de la cadena va el filtro. `HIGHEST_PRECEDENCE` lo pone **primero**, para que envuelva a todos los demás, incluido el que reenvía el pedido al microservicio: cualquier error que salga de la cadena pasa por acá.
+- **El logger a mano:** `private static final Logger log = LoggerFactory.getLogger(ServicioCaidoFilter.class);` es exactamente lo que genera `@Slf4j` en los microservicios. Acá se escribe a mano porque el gateway no usa Lombok (T61), igual que en el JAR común. Por eso hacen falta los dos imports: `org.slf4j.Logger` (el tipo) y `org.slf4j.LoggerFactory` (el que lo crea).
+- **`chain.filter(exchange).onErrorResume(condición, reemplazo)`:** es el `try/catch` del mundo reactivo. Deja seguir el pedido normalmente y, **solo si** termina con un error que cumple la condición, lo reemplaza por nuestra respuesta 503. Cualquier otro error sigue su camino.
+- **`esServicioCaido`:** recorre la cadena de causas del error (`getCause()`), porque la excepción original suele venir envuelta en otras. Busca dos:
+  - **`ConnectException`:** no se pudo abrir la conexión, porque el servicio no está escuchando ("Connection refused").
+  - **`UnknownHostException`:** no existe el nombre. Es lo que pasa en Docker con un contenedor detenido: el DNS interno ya no resuelve `ms-espacios`.
+- **`responder503`:** arma la respuesta a mano: código 503, `Content-Type: application/json` y nuestro `ApiResponse` convertido a JSON con el `JsonMapper` que ya configura Spring Boot (Jackson 3). En WebFlux, el cuerpo se escribe como un `DataBuffer` dentro de un `Mono`.
+- **Por qué ahora el gateway usa `campus-commons`:** solo por `ApiResponse`, para que el 503 tenga exactamente el mismo formato que el resto de la API. El `GlobalExceptionHandler` del JAR común no se activa en el gateway, porque su paquete (`...campus.commons`) no se escanea. Ver T61.
+- **El timeout de conexión va en el `application.yaml`:** el filtro decide **qué** responder; cuánto se espera antes de darse por vencido lo fija `connect-timeout: 2000` (T70). Un `ConnectTimeoutException` de Netty hereda de `ConnectException`, así que el filtro también lo atrapa.
+- **Por qué no un circuit breaker:** D4. Un timeout y un 503 claro alcanzan para este TP; un circuit breaker suma estados y configuración que hay que explicar y probar.
+- **Probado:** con el servicio apuntando a un puerto donde no escucha nadie (conexión rechazada) y a un host que no existe, los dos casos dieron 503 con el `ApiResponse` y su WARN en el log. Un pedido sin token sigue dando 401, porque la seguridad corre antes que los filtros del gateway. En Docker, con `docker compose stop ms-espacios`, `GET /api/espacios` da 503 en 2 segundos (antes del timeout, 30).
+
+---
+
+## Fase 4: Docker Compose y cierre
+
+**`build.sh`: compilar todo en orden**
+
+> "Es un script que deja todo compilado en un solo paso, desde la raíz del repo. Primero instala `campus-commons` en el repositorio local de Maven (`~/.m2`), porque los dos microservicios lo declaran como dependencia y Maven lo busca ahí. Después empaqueta ms-espacios, ms-reservas y el gateway, cada uno en su JAR ejecutable dentro de su carpeta `target/`. Esos JAR son los que después copia cada `Dockerfile`. Si cualquier paso falla, el script se corta, así nunca se arman imágenes con un JAR viejo."
+
+Ideas clave por si repreguntan:
+
+- **`#!/bin/sh` (shebang):** la primera línea le dice al sistema con qué intérprete correr el archivo. `sh` está en Linux, en Mac y en Git Bash de Windows. En PowerShell no existe ("El término sh no se reconoce"): ahí se corre con `& "C:\Program Files\Git\bin\bash.exe" build.sh`, o directamente desde una terminal de Git Bash.
+- **`set -e`:** si un comando termina con error, el script se detiene en ese momento. Sin esto, si falla `campus-commons`, igual intentaría compilar los servicios y daría errores confusos ("no encuentro campus-commons").
+- **Por qué el orden importa:** `campus-commons` no se publica en ningún repositorio de internet; solo existe en el `.m2` de cada máquina después del `mvn install`. Si un servicio se compila antes, Maven no encuentra la dependencia.
+- **`install` vs. `package`:** `package` arma el JAR en `target/`; `install` además lo copia al `.m2` para que otros proyectos lo usen. Solo `campus-commons` necesita `install`, porque es una librería; los demás son aplicaciones y alcanza con `package`.
+- **`mvn -f carpeta/pom.xml`:** corre Maven sobre ese `pom.xml` sin tener que entrar a la carpeta con `cd`.
+- **`clean`:** borra `target/` antes de compilar, así no quedan clases de una versión anterior.
+- **`-DskipTests`:** saltea los tests para que el empaquetado sea rápido. Los tests se corren aparte (`./mvnw verify` en cada proyecto, como dice la guía de pruebas).
+- **Por qué compilar afuera de Docker (D22):** cada imagen solo copia su JAR. Si compiláramos adentro (*multi-stage*), cada imagen necesitaría `campus-commons` dentro de su contexto de build, y el build sería más lento.
+- **En Windows, antes hay que apagar los servicios:** mientras un servicio corre, Windows bloquea su JAR y `clean` no puede borrar `target/`. Con `set -e`, el script se corta en ese paso.
+
+**`Dockerfile`: la imagen de cada aplicación**
+
+> "Es la receta para armar la imagen de Docker de una aplicación, y es la misma para las tres: ms-espacios, ms-reservas y el gateway. Parte de una imagen que ya trae Java 25 (`eclipse-temurin:25-jre`), copia el JAR que dejó `build.sh` en `target/` y define el comando que se ejecuta cuando arranca el contenedor: `java -jar app.jar`. No compila nada; solo empaqueta lo ya compilado."
+
+Ideas clave por si repreguntan:
+
+- **Imagen vs. contenedor:** la imagen es la plantilla, de solo lectura, con el sistema, Java y nuestro JAR. El contenedor es una instancia de esa imagen corriendo, con su propio sistema de archivos, su red y sus procesos. Con una imagen se pueden levantar varios contenedores.
+- **`FROM eclipse-temurin:25-jre`:** la imagen base. Eclipse Temurin es la distribución de OpenJDK de Adoptium, la misma que tenemos instalada. Es **JRE** y no JDK porque en el contenedor solo hace falta *ejecutar* Java, no compilar: la imagen pesa menos y tiene menos herramientas que un atacante pueda usar.
+- **`WORKDIR /app`:** la carpeta de trabajo dentro del contenedor (la crea si no existe). Los comandos que siguen corren ahí, y ahí queda la base H2 (`./data` → `/app/data`).
+- **`COPY target/*.jar app.jar`:** copia el JAR desde la carpeta del proyecto (el *contexto de build*) a la imagen, con un nombre fijo. El `*` evita escribir la versión (`0.0.1-SNAPSHOT`) y hace que el mismo `Dockerfile` sirva para los tres proyectos.
+- **`ENTRYPOINT ["java", "-jar", "app.jar"]`:** el comando principal del contenedor. Está en formato JSON (*exec form*): Java es el proceso principal y recibe directamente la señal de apagado (`docker compose stop`), así Spring cierra prolijo (el *graceful shutdown* que se ve en el log).
+- **Por qué sin `EXPOSE`:** `EXPOSE` solo documenta el puerto, no lo publica. Lo que decide qué es accesible desde afuera es `ports` en el `docker-compose.yml`. Lo dejamos afuera para que sea el mismo archivo en los tres proyectos (cada uno escucha en un puerto distinto).
+
+**`docker-compose.yml`: todo el sistema con un comando**
+
+> "Describe los cuatro contenedores del sistema y cómo se conectan: Keycloak, ms-espacios, ms-reservas y el gateway. Con `docker compose up --build`, Docker arma las tres imágenes con sus `Dockerfile` y levanta todo. Compose crea una red interna donde cada contenedor se llama por su nombre de servicio (`http://ms-espacios:8081`). Lo más importante es qué **no** está: ms-espacios y ms-reservas no tienen `ports`, así que desde afuera no se puede llegar a ellos. Solo se publican el gateway (8080) y Keycloak (8180). Esa red interna es nuestra *trusted zone*: lo único que llega a los microservicios pasa antes por el Security Filter, y por eso pueden confiar en el `X-Usuario`. Todo lo que cambia entre el IDE y Docker (las URLs de los servicios y de las claves de Keycloak) se pasa con variables de entorno, que pisan los valores por defecto del `application.yaml`: el mismo JAR corre en los dos lados sin cambiar código."
+
+Ideas clave por si repreguntan:
+
+- **`services`:** cada entrada es un contenedor. `image` usa una imagen ya hecha (Keycloak); `build` arma una con el `Dockerfile` de esa carpeta.
+- **`ports: ["8080:8080"]`:** `máquina:contenedor`. Publica el puerto del contenedor en la máquina. Sin `ports`, el contenedor sigue escuchando, pero solo para la red interna.
+- **La trusted zone, probada:** con todo en Docker, `curl localhost:8081` y `curl localhost:8082` no responden; por el gateway, sí.
+- **Nombres de servicio como hosts:** el DNS interno de Compose resuelve `ms-espacios` a la IP de ese contenedor. Por eso `MS_ESPACIOS_URL: http://ms-espacios:8081` y no `localhost`: dentro de un contenedor, `localhost` es el propio contenedor.
+- **`JWK_SET_URI: http://keycloak:8080/...`:** el gateway baja las claves por la red interna (puerto **interno** de Keycloak, 8080). El emisor sigue siendo `localhost:8180`, que es lo que dice el token que pide Postman (ver la sección `application.yaml` del gateway).
+- **`depends_on`:** ordena el **arranque** (ms-reservas después de ms-espacios, el gateway al final), pero no espera a que el otro esté listo. No hace falta más: el gateway baja las claves de Keycloak recién en el primer pedido, y ms-reservas llama a ms-espacios recién cuando alguien reserva.
+- **`TZ: America/Argentina/Cordoba`:** ver T68.
+- **Las bases H2 viven dentro de cada contenedor** (`/app/data`): sobreviven a `docker compose stop` y `start`, pero se pierden con `docker compose down`, que borra los contenedores. Ver T69.
+- **`--build`:** obliga a rearmar las imágenes. Hace falta cada vez que se corre `build.sh` de nuevo, porque si no, Docker usa la imagen vieja con el JAR anterior.
+
+**Colección de Postman (`Docs/CampusReservas.postman_collection.json` y `Docs/CampusReservas.postman_environment.json`)**
+
+> "Es la forma de probar la API sin frontend (D24). Tiene 62 pedidos en nueve carpetas, en el mismo orden que la guía: login, catálogo, validación, búsqueda, reservas, una por cada regla de negocio, estados, seguridad del gateway y resiliencia. Todos entran por el gateway con el JWT de Keycloak. La carpeta 0 tiene un login por usuario que guarda el token en el environment (`token_usuario1`, `token_usuario2`, `token_admin1`), y cada pedido usa el token del usuario que corresponde. Cada pedido tiene un test con el código HTTP esperado, así que con el Runner de Postman se corre la colección entera y se ve en verde que todo responde lo que tiene que responder."
+
+Ideas clave por si repreguntan:
+
+- **Collection y environment:** la colección tiene los pedidos; el environment, las variables que cambian según dónde corre: `gateway` (`http://localhost:8080`), `keycloak` (`http://localhost:8180`), los tokens y los ids que se van creando. Para probar contra otra máquina alcanza con cambiar el environment.
+- **El login guarda el token:** en la pestaña *Tests* del login, `pm.environment.set("token_usuario1", pm.response.json().access_token)`. Es lo que pedía el plan (sección 7.4).
+- **El token se renueva solo (T71):** un script de la colección, que corre antes de cada pedido, pide un token nuevo con `pm.sendRequest` cuando el guardado venció. Duran 5 minutos y la demo dura más.
+- **Las fechas se calculan solas:** el mismo script arma `{{dia}}` (el próximo día hábil a 2 o más días), `{{sabado}}`, `{{lejos}}` (a 20 días, para RN1) y `{{manana_inicio}}`, que es mañana a la misma hora: siempre menos de 24 h, para RN10. Así la colección sirve cualquier día, sin editar fechas.
+- **Los ids se guardan, no se adivinan (T72):** cada pedido que crea algo guarda el id que devolvió (`reserva_clase`, `reserva_evento`...), y los siguientes lo usan. Al final se cancelan las reservas que quedaron activas, así la colección se puede correr varias veces sin borrar la base.
+- **Lo que no está en Postman:** la concurrencia (RN15). Postman manda los pedidos de a uno; para que dos lleguen a la vez usamos `curl` con `&` (sección 3.6 de la guía). La carpeta 8, resiliencia, necesita apagar ms-espacios antes, así que no se corre junto con el resto.
+- **Probada:** contra Docker corrimos las carpetas 0 a 7 tres veces seguidas sobre la misma base (67 tests, 0 fallas cada vez) y la carpeta 8 con ms-espacios apagado (4 de 4).
+
+---
+
+## Logs
+
+**Qué registramos y para qué**
+
+> "Los dos microservicios escriben en su consola qué pasó con cada pedido importante, usando SLF4J, la interfaz de logs estándar de Java que trae Spring Boot (por debajo escribe Logback). Registramos tres tipos de cosas. Lo que el negocio hizo: cada reserva creada, aprobada, rechazada o cancelada, con quién y qué espacio. Cada error que devolvemos, con su código y su motivo: un 422 por una regla, un 409 por superposición, un 403 por una reserva ajena. Y las fallas de las dependencias: si ms-espacios u Open-Meteo no responden, queda escrito qué se pidió y qué error dio la conexión, aunque al usuario le llegue solo un 503 con un mensaje corto. Sirve para seguir qué pasa durante la demo y para diagnosticar un problema sin tener que reproducirlo."
+
+Dónde se loguea:
+
+| Dónde | Nivel | Qué dice (ejemplo real) |
+|---|---|---|
+| `ReservaService` (ms-reservas) | INFO | `Reserva 1 creada por usuario1: espacio 1 (Aula 101), 2026-11-06T10:00 a 2026-11-06T12:00, CONFIRMADA` |
+| `ReservaService` | INFO | `Reserva 2 aprobada por bedelía` · `Reserva 4 rechazada por bedelía` · `Reserva 1 cancelada por usuario1` |
+| `GlobalExceptionHandler` (JAR común, los dos servicios) | INFO | `422 Las salas se reservan por un máximo de 2 horas` · `409 El espacio ya está reservado en esa franja` · `403 La reserva no es tuya` · `404 No existe el espacio 99` |
+| `GlobalExceptionHandler` | WARN | `503 El servicio de espacios no está disponible` |
+| `GlobalExceptionHandler` | ERROR | `Error inesperado` + el stack trace completo (un bug: el cliente recibe 500) |
+| `EspaciosClient` (ms-reservas) | WARN | `ms-espacios no respondió al validar el espacio 2: I/O error ... Connection refused` |
+| `OpenMeteoClient` (ms-espacios) | WARN | `Open-Meteo no respondió para (-31.44, -64.19): ...` · `Open-Meteo devolvió una respuesta incompleta ...` |
+| `EspacioService` (ms-espacios) | WARN | `Se omite 'Cancha de fútbol' de la búsqueda: No se pudo consultar el pronóstico del clima` |
+| `ConcurrenciaExceptionHandler` (ms-reservas) | INFO | `409 choque de concurrencia: ObjectOptimisticLockingFailureException` |
+
+Ideas clave por si repreguntan:
+
+- **SLF4J:** es una **fachada**: el código usa su interfaz (`Logger`, `log.info(...)`) y la implementación concreta la pone Spring Boot (Logback). Si mañana se cambia la implementación, el código no cambia.
+- **`@Slf4j` (Lombok):** genera `private static final Logger log = LoggerFactory.getLogger(MiClase.class);`. En el JAR común se escribe a mano, porque `campus-commons` no usa Lombok.
+- **`slf4j-api` con `scope provided` en `campus-commons`:** igual que `spring-web`: el JAR común compila contra la interfaz, y la implementación la aporta el microservicio que lo usa (T7).
+- **Los `{}`:** son lugares que SLF4J completa con los argumentos, en orden. Es mejor que concatenar con `+`: si el nivel está apagado, no se arma el texto.
+- **Por qué cada nivel:**
+  - **INFO** para lo que es normal en el sistema: crear y cancelar reservas, o rechazar un pedido que no cumple una regla (un 4xx no es una falla nuestra, es el sistema funcionando).
+  - **WARN** cuando falla algo de lo que dependemos (5xx, ms-espacios u Open-Meteo caídos): hay que mirarlo, pero el sistema respondió bien.
+  - **ERROR** solo para un bug nuestro (500), con el stack trace para encontrarlo.
+- **El usuario no ve el detalle técnico; el log sí:** al cliente le llega "El servicio de espacios no está disponible"; en el log queda "Connection refused" y la URL. Así no mostramos cómo está armado el sistema por dentro, y nosotros igual podemos diagnosticar.
+- **`logging.level.ar.edu.utn.frc.bda.campus: ${LOG_LEVEL:INFO}`:** fija el nivel de **nuestro** código, sin tocar el de Spring o Hibernate. Por defecto INFO; con la variable de entorno `LOG_LEVEL=WARN` quedan solo las fallas. Es el mismo patrón `${VARIABLE:defecto}` del resto de la configuración (T15).
+- **No logueamos datos sensibles:** ni tokens ni contraseñas, solo el nombre de usuario (que ya está en la reserva).
+
+---
+
 ## Decisiones que tomamos
 
 Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las D1 a D25 del plan de desarrollo, y algunas se apoyan en ellas.
@@ -1451,10 +1693,11 @@ Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las
 - **Por qué:** en Spring 7, `UNPROCESSABLE_ENTITY` está *deprecated* y fue reemplazada por `UNPROCESSABLE_CONTENT`, el nombre que usa la especificación HTTP actual (RFC 9110). Es el mismo código 422.
 - **Descartamos:** la constante del plan, que compila pero con un warning y desaparecerá en una versión futura.
 
-**T10. Sin handler genérico para errores no previstos**
-- **Decisión:** el `GlobalExceptionHandler` no atrapa `Exception`. Un error inesperado sale como 500.
-- **Por qué:** un 500 significa "hay un bug en nuestro código". Queremos que se note para corregirlo, no disfrazarlo de error de negocio.
-- **Descartamos:** un `@ExceptionHandler(Exception.class)` que devuelva un 400 o un 422 genérico: escondería errores reales.
+**T10. Handler genérico que conserva el código: los errores no previstos siguen siendo 500**
+- **Decisión:** el `GlobalExceptionHandler` atrapa `Exception` (método `inesperado`), pero **no cambia el significado del error**: las excepciones de Spring conservan su código (404, 405…) y cualquier otra sale como 500 "Error interno del servidor", con el stack trace en el log (nivel ERROR).
+- **Por qué:** un 500 significa "hay un bug en nuestro código", y queremos que se note para corregirlo. Lo que ganamos con el handler es que **todas** las respuestas, también las de error inesperado y las de rutas que no existen, salen con el mismo `ApiResponse` (D25), y que el bug queda registrado con su stack trace.
+- **Historia:** al principio no lo teníamos (un error inesperado salía como 500 con el formato por defecto de Spring). Lo agregamos junto con los logs, en el commit `feat: logs`.
+- **Descartamos:** un `@ExceptionHandler(Exception.class)` que devuelva un 400 o un 422 genérico: escondería errores reales detrás de un "el pedido está mal".
 
 **T11. El código HTTP no va dentro de `ApiResponse`**
 - **Decisión:** el código viaja solo en la línea de estado HTTP.
@@ -1740,69 +1983,135 @@ Cada decisión dice qué elegimos, por qué y qué descartamos. Complementan las
   - **ms-espacios apagado:** crear y buscar → 503; `GET /mias` → 200, con los nombres de los espacios (D11).
 - **Lo que no corrimos acá:** RN4 con lluvia (`CLIMA_UMBRAL=0`). Ya está probado en ms-espacios (T42), y ms-reservas solo reenvía su motivo.
 
-### Gateway y seguridad
+### api-gateway: proyecto
 
-**T60. El gateway usa Spring Cloud 2025.1.4 y el starter `gateway-server-webflux`**
-- **Decisión:** lo que genera Initializr para Boot 4.1.2 con "Reactive Gateway": Spring Cloud 2025.1.4 (el plan dice 2025.1.x) y la dependencia `spring-cloud-starter-gateway-server-webflux`.
-- **Por qué:** Spring Cloud Gateway 5 renombró el starter (antes era `spring-cloud-starter-gateway`). Tomar lo que da Initializr asegura nombres y versiones compatibles con Boot 4.1.
+**T60. Gateway reactivo (`gateway-server-webflux`) y no el de Spring MVC**
+- **Decisión:** en Initializr elegimos **Reactive Gateway**, no **Gateway** (que en Spring Cloud 2025 es `gateway-server-webmvc`).
+- **Por qué:** es lo que pide el plan y lo que muestra el apunte 19, con `RouteLocator`, `GlobalFilter` y `SecurityWebFilterChain`. Además, un gateway casi no procesa: espera respuestas de otros servicios, y el modelo reactivo atiende muchos pedidos en espera con pocos hilos.
+- **Descartamos:** la versión MVC. Funcionaría parecido, pero cambian las clases de rutas, filtros y seguridad respecto del material de la materia, y tendríamos un tercer estilo de código en el TP.
 
-**T61. Un microservicio apagado da 503 en el gateway, no 500**
-- **Decisión:** un `GlobalFilter` (`ServicioNoDisponibleFilter`) atrapa el error de conexión (`ConnectException`) y responde 503 con el formato de `ApiResponse`: "El servicio no está disponible. Intentá más tarde."
-- **Por qué:** al probar con ms-espacios apagado, `GET /api/espacios` por el gateway respondía **500 Internal Server Error**. Un 500 dice "hay un bug"; lo que pasa es que una dependencia no responde, que es exactamente lo que significa 503 (D25).
-- **Descartamos:** un circuit breaker (Resilience4j), que el plan deja afuera (D4).
+**T61. El gateway usa `campus-commons` solo por `ApiResponse`; nada de Lombok ni springdoc**
+- **Decisión:** el `pom.xml` tiene las dos dependencias de Initializr (más las de test) y `campus-commons`. No tiene Lombok ni springdoc.
+- **Por qué:** el gateway no tiene controllers, ni entidades, ni excepciones de negocio. Al principio tampoco usaba el JAR común. Lo sumamos con `ServicioCaidoFilter`, para que el 503 tenga el mismo `ApiResponse` que el resto de la API (D25) en vez de copiar el record. El `GlobalExceptionHandler` del JAR común es de Spring MVC (`@RestControllerAdvice` sobre servlets) y no se aplica en WebFlux; como la clase principal no tiene `scanBasePackages`, Spring ni siquiera lo encuentra.
+- **Descartamos:** copiar `ApiResponse` dentro del gateway. Es un record de cuatro campos, pero duplicarlo es justo lo que el JAR común evita (D13): si mañana cambia el formato, cambia en un solo lugar.
+- **Descartamos:** agregar Spring Web (`starter-webmvc`) "por las dudas": con Spring MVC en el classpath, Boot levanta la aplicación como servlet (Tomcat) y el gateway reactivo se niega a arrancar, con el aviso de que Spring MVC es incompatible con Spring Cloud Gateway.
 
-**T62. Timeouts en el gateway: 2 s para conectar y 10 s para la respuesta**
-- **Decisión:** `spring.cloud.gateway.server.webflux.httpclient.connect-timeout: 2000` y `response-timeout: 10s`.
-- **Por qué:** por defecto el gateway no tiene timeout de respuesta: si un servicio queda colgado, el cliente espera para siempre. Lo probamos con un servidor que acepta la conexión y nunca contesta: a los 10 segundos, **504 Gateway Timeout**. Son 10 y no 3 porque una reserva puede encadenar dos llamadas (ms-reservas → ms-espacios → Open-Meteo), cada una con sus propios timeouts.
-- **Limitación conocida:** si Open-Meteo está **lento** (no caído), ms-espacios puede tardar hasta 5 s (2 de conexión y 3 de lectura), pero ms-reservas corta a los 3 s y responde "El servicio de espacios no está disponible" en vez de "no se pudo verificar el clima". Se resolvería con un timeout de lectura más largo en ms-reservas. Con Open-Meteo caído (lo que mostramos en la demo) el mensaje es el correcto, porque la conexión falla al instante.
+### api-gateway: código y cierre de la Fase 3
 
-**T63. El gateway no depende de `campus-commons`**
-- **Decisión:** el 503 del gateway arma el JSON con el mismo formato de `ApiResponse`, pero a mano.
-- **Por qué:** el JAR común está pensado para los microservicios Spring MVC (su `GlobalExceptionHandler` es un `@RestControllerAdvice` de MVC). El gateway es reactivo y solo necesita un mensaje fijo.
+**T62. El nombre del header en una constante**
+- **Decisión:** `UsuarioHeaderFilter` usa `HEADER = "X-Usuario"` en vez de escribir el texto dos veces, como en el plan.
+- **Por qué:** el filtro borra y vuelve a poner el mismo header; si uno de los dos estuviera mal escrito, el borrado no serviría y el cliente podría mandar un `X-Usuario` falso. Con la constante, eso no puede pasar. Es lo mismo que hace `ReservaController` del otro lado (`USUARIO = "X-Usuario"`).
 
-**T64. El 401 y el 403 del gateway no tienen cuerpo**
+**T63. El filtro va en el paquete `filters`**
+- **Decisión:** `GatewayConfig` y `SecurityConfig` van en `config`; `UsuarioHeaderFilter`, en `filters`.
+- **Por qué:** las dos primeras se ejecutan una vez al arrancar y arman la configuración; el filtro se ejecuta en cada pedido. Separarlos deja claro qué es qué, igual que en los microservicios cada capa tiene su paquete.
+
+**T75. El 401 y el 403 del gateway no tienen cuerpo**
 - **Decisión:** dejamos las respuestas por defecto de Spring Security: el código, sin `ApiResponse`.
 - **Por qué:** el código ya dice todo (no autenticado o sin permiso), y Spring agrega el header `WWW-Authenticate` con el detalle, que es el estándar de OAuth 2. Es lo que usamos como argumento en T11: hay respuestas que no tienen nuestro cuerpo, y por eso el código HTTP va en la línea de estado.
 
-**T65. Verificamos la tabla 7.4 del plan entrando por el gateway**
-- **Decisión:** con Keycloak, los dos servicios y el gateway corriendo, y tokens reales de `usuario1`, `usuario2` y `admin1`, probamos todos los casos. Todos dieron el código esperado:
+**T64. Verificamos el criterio de terminado de la Fase 3 contra Keycloak**
+- **Decisión:** con Keycloak, ms-espacios, ms-reservas y el gateway corriendo, pedimos tokens reales de `usuario1`, `usuario2` y `admin1` y recorrimos la tabla 7.4 del plan, siempre contra `http://localhost:8080`. Todos dieron el código esperado:
   - `GET /api/espacios` sin token → 401; con usuario1 → 200.
   - `POST /api/espacios` con usuario1 → 403; con admin1 → 201.
-  - `GET /api/reservas/disponibilidad` con usuario1 → 200.
-  - `POST /api/reservas` con usuario1 → 201, con `"usuario": "usuario1"` **aunque mandó `X-Usuario: usuario2`** a mano.
+  - `GET /api/reservas/disponibilidad` con usuario1 → 200 con el Aula 101.
+  - `POST /api/reservas` con usuario1 → 201, con `"usuario":"usuario1"` en la respuesta.
   - `GET /api/reservas` con usuario1 → 403; con admin1 → 200.
   - Token modificado a mano → 401.
-  - `PATCH .../aprobar` con usuario1 → 403; con admin1 → 200.
-  - `GET /api/reservas?estado=PENDIENTE` con admin1 → 200.
-- **Extras:** usuario2 cancela la de usuario1 → 403 (lo decide ms-reservas, RN7); admin1 intenta reservar → 403; ruta inexistente → 403 (`denyAll`); ms-espacios apagado → 503 (T61), y `GET /api/reservas/mias` sigue en 200.
+  - `PATCH /aprobar` con usuario1 → 403; `GET ?estado=PENDIENTE` con admin1 → 200; `PATCH /aprobar` con admin1 → 200 y el evento pasa a CONFIRMADA.
+- **Casos extra que agregamos:**
+  - **`X-Usuario` falso:** usuario1 creó la reserva mandando además `X-Usuario: usuario2`, y la reserva quedó a nombre de **usuario1**. El gateway borró el header del cliente.
+  - **usuario2 cancela la reserva de usuario1 → 403:** este 403 no lo da el gateway (usuario2 tiene el rol USUARIO, la ruta está permitida), sino ms-reservas (RN7), con el `X-Usuario` que puso el gateway.
+  - **admin1 crea una reserva → 403:** la ruta es solo para USUARIO.
+  - **Ruta que no existe (`/api/otra`) con token válido → 403:** la corta `denyAll()`; nunca llega a ningún servicio.
+- **Lo que no corrimos acá:** el token **vencido** (los de Keycloak duran 5 minutos; el modificado a mano prueba el mismo camino, la firma o los claims no validan) y la colección de Postman, que queda para la Fase 4 junto con el resto de la documentación.
 
-### Persistencia
+### Docker Compose
 
-**T67. El DER sale del esquema real, no de las entidades**
-- **Decisión:** leímos columnas, claves y restricciones de `INFORMATION_SCHEMA`, en copias de las dos bases y en bases recién creadas por Hibernate. Las relaciones entre bases van punteadas.
-- **Por qué:** el enunciado exige que los diagramas coincidan con lo implementado, y varias cosas no se ven en el código Java: las `UNIQUE` de los `Set`, los `CHECK` de los enums y qué columnas son `NOT NULL`. La línea punteada muestra que esas relaciones no las controla la base.
-- **Descartamos:** dibujar FK entre `reservas` y `espacios`, porque no existen. También un DER por microservicio: un solo diagrama muestra la frontera entre las bases.
+**T68. Zona horaria de Argentina en los contenedores (`TZ`)**
+- **Decisión:** los tres contenedores nuestros llevan `TZ: America/Argentina/Cordoba` en el `docker-compose.yml`. El plan no lo tenía.
+- **Por qué:** las imágenes de Docker corren en UTC. Lo verificamos: a las 09:48 de acá, un contenedor de `eclipse-temurin:25-jre` sin `TZ` marcaba 12:48. Nuestras reglas comparan con `LocalDateTime.now()` (RN1: que la reserva sea futura; RN7: cancelar antes de que empiece; RN10: 24 h para el laboratorio) y las fechas del usuario están en hora de Argentina. En UTC, el sistema estaría tres horas adelantado: a las 9 de la mañana rechazaría por "pasada" una reserva para las 11. Con `TZ`, Java toma la hora local (los logs salen con `-03:00`) y una reserva para dentro de dos horas se crea bien. También lo probamos.
+- **Descartamos:** cambiar el código para usar `ZonedDateTime` o un `Clock` con zona fija: más cambios en todas las reglas para resolver algo que es de configuración del entorno. Tampoco `-Duser.timezone` en el `Dockerfile`: quedaría escondido en la imagen, y con `TZ` también el sistema del contenedor (el comando `date`) da la hora correcta.
 
-**T68. Los enums tienen un `CHECK` en la base, y lo dejamos así**
-- **Decisión:** no cambiamos el código. Documentamos que, para agregar un valor a un enum en una base existente, hay que borrar `data/` o eliminar el `CHECK`. Corrige lo que decían T18 y T43.
-- **Por qué:** `@JdbcTypeCode(SqlTypes.VARCHAR)` cambia el tipo de la columna, pero Hibernate igual crea, por ejemplo, `"TIPO" IN('AULA', 'LABORATORIO', 'SALA', 'CANCHA')`. Lo probamos en una copia del proyecto: con `AUDITORIO` en el enum, `ddl-auto: update` no amplió el `CHECK` y el `INSERT` falló; en una base nueva, la lista ya incluía `AUDITORIO`. Para el TP alcanza: las bases son locales y `DatosIniciales` recarga los espacios. Además, el `CHECK` protege contra valores inválidos.
-- **Descartamos:** cambiar el mapeo solo para quitar el `CHECK`, porque no es parte de ninguna regla del TP y habría que volver a probar las entidades. El argumento del Strategy sigue siendo válido para el código: el service no cambia.
+**T69. Sin volúmenes para las bases H2**
+- **Decisión:** las bases quedan dentro de cada contenedor, sin `volumes`.
+- **Por qué:** para el TP alcanza con que sobrevivan a un `stop` y `start` (D10), y que `down` las borre es útil: cada demo arranca limpia, con los 5 espacios de prueba y los ids de las reservas desde 1, como en la guía.
+- **Descartamos:** un volumen por servicio. Es lo que se haría en producción, pero obligaría a borrarlos a mano (`docker compose down -v`) antes de cada demo.
 
-### Arquitectura
+**T70. El gateway espera como máximo 2 segundos para conectarse con un microservicio**
+- **Decisión:** `spring.cloud.gateway.server.webflux.httpclient.connect-timeout: 2000` en el `application.yaml` del gateway.
+- **Por qué:** al probar la guía en Docker, con ms-espacios apagado, `GET /api/espacios` tardaba **30 segundos** en dar el 503. El gateway todavía tenía guardada la IP del contenedor, y conectarse a una IP donde ya no hay nadie no falla enseguida: espera hasta el timeout de Netty, que por defecto es de 30 s. Crear y buscar reservas daban 503 al instante porque el `RestClient` de ms-reservas ya tenía 2 s para conectar y 3 para leer (`RestClientConfig`). Con el mismo valor en el gateway, los dos caminos se comportan igual.
+- **Probado:** con la IP guardada, 503 en 2,0 s (el log dice `connection timed out after 2000 ms`); con el gateway recién levantado, el nombre `ms-espacios` ya no resuelve y da 503 por `Failed to resolve`.
+- **Descartamos:** un `response-timeout` (cuánto esperar la respuesta, una vez conectado). Ningún pedido nuestro tarda tanto: el más lento es la búsqueda de disponibles, y ese ya tiene sus propios timeouts para ms-espacios y Open-Meteo.
+- **Limitación conocida:** si Open-Meteo está **lento** (no caído), ms-espacios puede tardar hasta 5 s (2 de conexión y 3 de lectura), pero ms-reservas corta a los 3 s y responde "El servicio de espacios no está disponible" en vez de "no se pudo verificar el clima". Se resolvería con un timeout de lectura más largo en ms-reservas. Con Open-Meteo caído (lo que mostramos en la demo) el mensaje es el correcto, porque la conexión falla al instante.
 
-**T66. El C2 final actualiza tres detalles del diagrama de la Entrega 1**
-- **Decisión:** separamos `Usuarios` en `Usuario` y `Administrador`, escribimos `HTTP/JSON` en vez de `HTTPS/JSON` para las llamadas al gateway y sacamos Swagger como cliente. Además, `X-Usuario` aparece en las dos rutas. Los nombres de los contenedores no cambian.
-- **Por qué:** así coincide con los actores del C1 y con lo que hace el sistema. `localhost:8080` y Keycloak en `start-dev` usan HTTP sin certificado; el gateway solo rutea `/api/espacios/**` y `/api/reservas/**`, por lo que en Docker Swagger no queda accesible; y `UsuarioHeaderFilter` es global. La Entrega 1 ya aclaraba que la versión final iba a reflejar lo desplegado.
-- **Descartamos:** dejar `HTTPS` en el diagrama, porque describe producción y no nuestro despliegue.
+### Swagger
 
-### Documentación
+**T74. Swagger muestra el 201 de los POST y los códigos completos de cada endpoint**
+- **Decisión:** `@ResponseStatus(HttpStatus.CREATED)` en los dos POST de creación, las descripciones de `validacion`, `compatibles` y `disponibilidad` completadas con sus códigos, y un `@OpenAPIDefinition` con el título en cada clase `...Application`.
+- **Por qué:** al revisar la especificación que genera cada servicio (`/v3/api-docs`) contra lo implementado, encontramos tres diferencias. Los POST figuraban con 200 aunque responden 201. A tres descripciones les faltaban códigos: el 422 de una franja mal armada (`validarFranja` y `ReglasFranja`) y el 503 de la búsqueda. Y el título era el genérico "OpenAPI definition v0".
+- **Probado:** después del cambio, `/v3/api-docs` muestra 201 en los POST y los títulos `ms-espacios 1.0` y `ms-reservas 1.0`; el POST sigue respondiendo 201 y la colección de Postman pasa entera (67 de 67).
+- **Descartamos:** una anotación `@ApiResponse` de Swagger por cada código, que los mostraría en la tabla *Responses*. Se llama igual que nuestro `ApiResponse` de `campus-commons`, así que habría que escribir `@io.swagger.v3.oas.annotations.responses.ApiResponse(...)` completo unas 35 veces. Los códigos ya están en la descripción de cada endpoint.
 
-**T66. Ajustamos el C1 de la Entrega 1 a lo implementado**
+### Diagramas
+
+**T73. El C2 se actualizó con la dependencia del gateway a `campus-commons`**
+- **Decisión:** al revisar C1 y C2 contra lo desplegado, el C1 coincidía entero y el C2 en todo salvo un detalle: el gateway también depende de `campus-commons`, solo por `ApiResponse`, desde que el 503 de `ServicioCaidoFilter` usa el mismo formato que el resto de la API (T61). Agregamos esa flecha ("Dependencia Maven, solo ApiResponse") y corregimos dos textos de la Entrega: en 5.2, los timeouts (2 s para conectar y 3 s para responder, y el 503 del gateway al consultar espacios) y en 5.6, que el gateway también usa el JAR.
+- **Por qué:** el enunciado exige que los diagramas coincidan con lo desplegado. Es una dependencia de compilación, no una comunicación entre contenedores: el JAR no se despliega, igual que para los microservicios.
+- **Cómo:** el `.puml` original no estaba en el repo, así que el C2 quedó redibujado en `Docs/diagramas/c2-contenedores.svg` (con el mismo estilo C4) y exportado a `c2-contenedores.png`, que es la imagen de la Entrega. Para cambiarlo de nuevo se edita el SVG.
+
+**T76. Ajustamos el C1 de la Entrega 1 a lo implementado**
 - **Decisión:** los pedidos al sistema pasan de `HTTPS/JSON + JWT` a `HTTP/JSON + JWT`; "Valida los tokens" pasa a "Obtiene las claves públicas para validar los JWT"; acortamos las descripciones del C1 y reordenamos la disposición para que las líneas no se crucen.
 - **Por qué:** el enunciado exige que los diagramas coincidan con lo desplegado. El gateway y Keycloak corren por HTTP, y la validación del JWT la hace nuestro sistema, no Keycloak: de Keycloak solo baja las claves.
 - **Descartamos:** dibujar el gateway o Postman en el C1. El gateway es interno (va en el C2) y Postman es solo una herramienta de prueba (D24).
 
-**T69. La Sección 04 numera funcionalidades y pasos, y usa un diagrama de actividades con carriles**
+**T77. El C2 final actualiza tres detalles del diagrama de la Entrega 1**
+- **Decisión:** separamos `Usuarios` en `Usuario` y `Administrador`, escribimos `HTTP/JSON` en vez de `HTTPS/JSON` para las llamadas al gateway y sacamos Swagger como cliente. Además, `X-Usuario` aparece en las dos rutas. Los nombres de los contenedores no cambian.
+- **Por qué:** así coincide con los actores del C1 y con lo que hace el sistema. `localhost:8080` y Keycloak en `start-dev` usan HTTP sin certificado; el gateway solo rutea `/api/espacios/**` y `/api/reservas/**`, por lo que en Docker Swagger no queda accesible; y `UsuarioHeaderFilter` es global. La Entrega 1 ya aclaraba que la versión final iba a reflejar lo desplegado.
+- **Descartamos:** dejar `HTTPS` en el diagrama, porque describe producción y no nuestro despliegue.
+
+**T78. La Sección 04 numera funcionalidades y pasos, y usa un diagrama de actividades con carriles**
 - **Decisión:** agregamos los identificadores F1 a F9 y P1 a P16, mantenemos RN1 a RN15 y dibujamos el proceso con carriles en PlantUML. La prioridad es Alta si el proceso principal no se puede completar sin esa funcionalidad.
 - **Por qué:** la consigna pide identificadores y prioridad, que la Entrega 1 no tenía, y relacionar funcionalidades y reglas con los pasos. Los carriles muestran quién hace cada paso y dónde colaboran los servicios. PlantUML es la misma herramienta del C1 y el C2.
 - **Descartamos:** un diagrama de secuencia, porque muestra bien los mensajes, pero peor las decisiones y el recorrido completo; y BPMN, porque sumaba una herramienta sin aportar información.
+
+### Postman
+
+**T71. La colección renueva sola los tokens vencidos**
+- **Decisión:** además del login por usuario que pide el plan, un script de la colección (*Pre-request*) pide un token nuevo con `pm.sendRequest` cuando el guardado venció, y lo guarda en el mismo `token_usuarioX`.
+- **Por qué:** los tokens de Keycloak duran 5 minutos. Sin esto, a mitad de la demo todos los pedidos empezarían a dar 401 y habría que volver a la carpeta de login cada tanto. Los logins siguen estando, para mostrar cómo se pide el token.
+- **Descartamos:** alargar la duración del token en el realm. Es más simple, pero cambia la configuración de seguridad solo para que la demo sea cómoda.
+
+**T72. Cada pedido guarda el id que crea, y al final se cancela lo que quedó activo**
+- **Decisión:** los pedidos que crean algo guardan el id en el environment (`espacio_nuevo`, `reserva_clase`, `reserva_evento`...), y los que vienen después lo usan en la URL. Si no se creó, el id queda en 0, así el pedido siguiente da 404 y no toca una reserva de una corrida anterior. Al final de las carpetas 6 y 7 se cancelan las reservas que quedaron activas.
+- **Por qué:** en la guía los ids están escritos (reservas 1 a 4) y solo coinciden con la base vacía. La colección se puede correr varias veces seguidas sobre la misma base: lo probamos tres veces y pasó entera cada vez.
+- **Descartamos:** borrar las reservas al final. No hay endpoint para borrar reservas (y no corresponde: una reserva cancelada queda como historial), así que cancelar es lo que corresponde.
+
+### Logs
+
+**T65. Un nivel de log por tipo de situación: INFO, WARN y ERROR**
+- **Decisión:** los 4xx y las acciones del negocio van con INFO; las fallas de ms-espacios y de Open-Meteo, y los 5xx, con WARN; un error inesperado (500), con ERROR y su stack trace.
+- **Por qué:** el nivel dice qué tan urgente es. Un 422 no es un problema del sistema, es una regla cumpliéndose; que ms-espacios no responda sí hay que mirarlo; un 500 es un bug. Con `LOG_LEVEL=WARN` se ve de un vistazo solo lo que falló.
+- **Descartamos:** loguear todo como ERROR (taparía los problemas reales) o los 4xx como WARN (en una demo, cada regla probada parecería una falla).
+
+**T66. El nivel de nuestro código se cambia con `LOG_LEVEL`, sin tocar el de Spring**
+- **Decisión:** `logging.level.ar.edu.utn.frc.bda.campus: ${LOG_LEVEL:INFO}` en los dos microservicios.
+- **Por qué:** permite bajar el ruido para la demo, o cambiar el nivel en Docker con una variable de entorno, sin recompilar. Al aplicarse solo a nuestro paquete, los logs de arranque de Spring y Hibernate no cambian.
+- **Aclaración:** hoy no tenemos ningún `log.debug`, así que `LOG_LEVEL=DEBUG` no muestra nada extra de nuestro código (el comentario del `application.yaml` lo anticipa para cuando se agreguen). Los valores útiles son INFO, el de siempre, y WARN, que deja solo las fallas.
+
+**T67. Lo que no se loguea, y por qué**
+- **Los 400:** los handlers de formato (`@Valid`, parámetro o header faltante, tipo inválido, JSON ilegible) responden directo, sin pasar por `error(...)`, así que no dejan línea en el log. Es aceptable: un 400 es un error del cliente que ya recibe el detalle en la respuesta.
+- **El gateway:** solo loguea cuando un microservicio no responde (`WARN ... ServicioCaidoFilter : 503 /api/espacios no responde: ...`). Un 401 o un 403 no aparecen en ninguna terminal; se ven en la respuesta. Los pedidos que pasan sí dejan su rastro en el microservicio al que llegan.
+- **Datos sensibles:** nunca se loguean tokens ni contraseñas.
+
+### Persistencia
+
+**T79. El DER sale del esquema real, no de las entidades**
+- **Decisión:** leímos columnas, claves y restricciones de `INFORMATION_SCHEMA`, en copias de las dos bases y en bases recién creadas por Hibernate. Las relaciones entre bases van punteadas.
+- **Por qué:** el enunciado exige que los diagramas coincidan con lo implementado, y varias cosas no se ven en el código Java: las `UNIQUE` de los `Set`, los `CHECK` de los enums y qué columnas son `NOT NULL`. La línea punteada muestra que esas relaciones no las controla la base.
+- **Descartamos:** dibujar FK entre `reservas` y `espacios`, porque no existen. También un DER por microservicio: un solo diagrama muestra la frontera entre las bases.
+
+**T80. Los enums tienen un `CHECK` en la base, y lo dejamos así**
+- **Decisión:** no cambiamos el código. Documentamos que, para agregar un valor a un enum en una base existente, hay que borrar `data/` o eliminar el `CHECK`. Corrige lo que decían T18 y T43.
+- **Por qué:** `@JdbcTypeCode(SqlTypes.VARCHAR)` cambia el tipo de la columna, pero Hibernate igual crea, por ejemplo, `"TIPO" IN('AULA', 'LABORATORIO', 'SALA', 'CANCHA')`. Lo probamos en una copia del proyecto: con `AUDITORIO` en el enum, `ddl-auto: update` no amplió el `CHECK` y el `INSERT` falló; en una base nueva, la lista ya incluía `AUDITORIO`. Para el TP alcanza: las bases son locales y `DatosIniciales` recarga los espacios. Además, el `CHECK` protege contra valores inválidos.
+- **Descartamos:** cambiar el mapeo solo para quitar el `CHECK`, porque no es parte de ninguna regla del TP y habría que volver a probar las entidades. El argumento del Strategy sigue siendo válido para el código: el service no cambia.

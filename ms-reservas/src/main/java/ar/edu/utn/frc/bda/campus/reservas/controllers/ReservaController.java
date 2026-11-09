@@ -4,6 +4,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Set;
 
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -41,6 +42,7 @@ public class ReservaController {
     private final ReservaService service;
 
     @PostMapping
+    @ResponseStatus(HttpStatus.CREATED) // para que Swagger muestre 201 (el código lo pone igual el ResponseEntity)
     @Operation(summary = "Crear una reserva (USUARIO)",
             description = "201: CONFIRMADA, o PENDIENTE si es un EVENTO. 400 formato; 404 espacio inexistente; "
                     + "409 superposición o choque simultáneo; 422 regla de negocio; 503 ms-espacios o el clima no responden")
@@ -81,8 +83,10 @@ public class ReservaController {
     }
 
     @GetMapping("/disponibilidad")
-    @Operation(summary = "Buscar espacios disponibles (USUARIO)",
-            description = "Espacios que cumplen las reglas de ms-espacios y no tienen una reserva activa en la franja")
+    @Operation(summary = "Buscar espacios disponibles (USUARIO)", 
+    description = "Espacios que cumplen las reglas de ms-espacios y no tienen una reserva activa en la franja. "
+            + "400 si un parámetro es inválido; 422 si la franja no cumple RN1 o RN2 o los asistentes no son más de 0; "
+            + "503 si ms-espacios no responde")
     public ResponseEntity<ApiResponse<List<EspacioDisponible>>> disponibilidad(
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime inicio,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fin,

@@ -1,4 +1,4 @@
-# docker-compose.yml (versión fase 0: solo Keycloak; los servicios se agregan en la fase 4)
+# docker-compose.yml: todo el sistema. Antes: sh build.sh. Después: docker compose up --build
 services:
   keycloak:
     image: quay.io/keycloak/keycloak:26.8.1
@@ -10,3 +10,26 @@ services:
       - ./keycloak:/opt/keycloak/data/import
     ports:
       - "8180:8080"
+
+  ms-espacios:
+    build: ./ms-espacios            # sin ports: solo accesible por la red interna
+    environment:
+      TZ: America/Argentina/Cordoba   # las imágenes corren en UTC (T68)
+
+  ms-reservas:
+    build: ./ms-reservas
+    environment:
+      TZ: America/Argentina/Cordoba
+      MS_ESPACIOS_URL: http://ms-espacios:8081
+    depends_on: [ms-espacios]
+
+  api-gateway:
+    build: ./api-gateway
+    ports:
+      - "8080:8080"                 # el único punto de entrada
+    environment:
+      TZ: America/Argentina/Cordoba
+      MS_ESPACIOS_URL: http://ms-espacios:8081
+      MS_RESERVAS_URL: http://ms-reservas:8082
+      JWK_SET_URI: http://keycloak:8080/realms/campus/protocol/openid-connect/certs
+    depends_on: [keycloak, ms-espacios, ms-reservas]

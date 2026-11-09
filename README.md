@@ -133,7 +133,7 @@ flowchart LR
 | **ms-espacios** | ABM de espacios; valida si un espacio sirve para una franja según las reglas de su tipo; lista los espacios compatibles; consulta Open-Meteo |
 | **ms-reservas** | Ciclo de vida de la reserva (crear, aprobar, rechazar, cancelar, listar); cadena de validaciones; estados; concurrencia; búsqueda de disponibles |
 | **Keycloak** | Identity Provider: usuarios, roles `USUARIO` y `ADMIN`, emisión de JWT |
-| **campus-commons** | JAR Maven compartido: `ApiResponse`, excepciones de negocio y manejo de errores común (404, 409, 422, 503) |
+| **campus-commons** | JAR Maven compartido: `ApiResponse`, excepciones de negocio y manejo de errores común (400, 403, 404, 409, 422, 503) |
 
 ### Cómo colaboran los servicios
 
@@ -142,7 +142,130 @@ Ningún servicio puede resolver solo una reserva: **ms-espacios no conoce la ocu
 - **Crear una reserva:** ms-reservas pregunta a `GET /api/espacios/{id}/validacion` si el espacio sirve para la franja (horario, actividad, equipamiento, reglas del tipo y clima).
 - **Buscar disponibles:** ms-reservas pide `GET /api/espacios/compatibles` y descarta los que ya están ocupados.
 
-Si una dependencia externa falla, el sistema responde **503** en vez de romperse: sin ms-espacios no se crea ni se busca, pero se puede listar y cancelar; sin Open-Meteo las canchas no se pueden reservar y se omiten de las búsquedas, pero el resto de los espacios sigue funcionando.
+Si una dependencia falla, el sistema responde **503** ("ahora no puedo, reintentá más tarde") en vez de romperse con un 500:
+
+- **ms-espacios no responde:** no se puede crear una reserva ni buscar disponibles (503), pero sí listar y cancelar las reservas, porque cada reserva guarda una copia del nombre del espacio. Las rutas que van directo a ms-espacios (`/api/espacios/**`) también dan 503: lo responde el gateway, en 2 segundos como máximo.
+- **Open-Meteo no responde:** ver [más abajo](#qué-pasa-si-open-meteo-no-responde).
+
+---
+
+## Cómo levantarlo
+
+### Requisitos
+
+| Herramienta | Versión | Para qué |
+|---|---|---|
+| Java (JDK) | 25 | Compilar los JAR (las imágenes de Docker no compilan: copian el JAR) |
+| Maven | 3.9 o más | Instalar `campus-commons` en el repositorio local |
+| Docker Desktop | reciente | Correr todo el sistema |
+| Git Bash (en Windows) | viene con Git | Correr `build.sh` y los comandos de prueba |
+
+### 1. Compilar
+
+Desde la raíz del repo, en Git Bash (o en Linux / Mac):
+
+```bash
+sh build.sh
+```
+
+En PowerShell, `sh` no existe; se llama al bash de Git:
+
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" build.sh
+```
+
+`build.sh` instala primero `campus-commons` en `~/.m2` (los otros tres dependen de él) y después empaqueta ms-espacios, ms-reservas y el gateway. Tienen que salir cuatro `BUILD SUCCESS`.
+
+### 2. Levantar
+
+```bash
+docker compose up -d --build
+```
+
+Levanta cuatro contenedores: `keycloak`, `ms-espacios`, `ms-reservas` y `api-gateway`. Keycloak tarda entre 20 y 40 segundos en arrancar y los servicios Spring entre 10 y 20. Está todo listo cuando:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8180/realms/campus   # 200
+docker compose logs ms-espacios ms-reservas api-gateway | grep Started        # tres líneas
+```
+
+| Puerto | Qué |
+|---|---|
+| 8080 | API Gateway: el único punto de entrada a la API |
+| 8180 | Keycloak: tokens y consola de administración (<http://localhost:8180/admin>, `admin` / `admin`) |
+
+ms-espacios (8081) y ms-reservas (8082) no publican puertos: desde afuera solo se llega a ellos por el gateway.
+
+### 3. Usuarios de prueba
+
+Vienen en `keycloak/realm-campus.json`, que Keycloak importa al arrancar. La contraseña es igual al usuario.
+
+| Usuario | Contraseña | Rol |
+|---|---|---|
+| `usuario1` | `usuario1` | USUARIO |
+| `usuario2` | `usuario2` | USUARIO |
+| `admin1` | `admin1` | ADMIN |
+
+ms-espacios arranca con 5 espacios de prueba: Aula 101, Aula 102, Laboratorio 3, Sala de reuniones y Cancha de fútbol.
+
+### 4. Probarlo
+
+Se pide un token a Keycloak y se lo manda al gateway en `Authorization: Bearer`. El token dura 5 minutos.
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8180/realms/campus/protocol/openid-connect/token \
+  -d grant_type=password -d client_id=campus-api -d username=usuario1 -d password=usuario1 \
+  | sed -E 's/.*"access_token":"([^"]+)".*/\1/')
+
+curl -s http://localhost:8080/api/espacios -H "Authorization: Bearer $TOKEN"
+```
+
+El recorrido completo de la demo, con un comando por cada regla de negocio, está en la [guía de pruebas](Docs/guia-pruebas.md). Los mismos pedidos, con un test cada uno, están en la **colección de Postman** (`Docs/CampusReservas.postman_collection.json`, con su environment `Docs/CampusReservas.postman_environment.json`): se importan los dos, se elige el environment *CampusReservas (Docker)* y se corre con el Runner.
+
+### 5. Apagar
+
+```bash
+docker compose stop    # apaga sin borrar: "docker compose start" sigue con los mismos datos
+docker compose down    # apaga y borra los contenedores: la próxima vez arranca con la base vacía
+```
+
+Las bases H2 viven dentro de cada contenedor, así que `down` deja el sistema como recién instalado.
+
+> **Modo local (para desarrollar):** se puede dejar solo Keycloak en Docker (`docker compose up -d keycloak`) y correr cada servicio desde el IDE o con `./mvnw spring-boot:run`. En ese modo los microservicios sí publican sus puertos y tienen Swagger en `http://localhost:8081/swagger-ui.html` y `http://localhost:8082/swagger-ui.html`. Detalles en la sección 6 de la [guía de pruebas](Docs/guia-pruebas.md).
+
+---
+
+## Endpoints
+
+Todos se llaman por el gateway (`http://localhost:8080`) con un JWT. Las respuestas tienen siempre el mismo formato, `ApiResponse`: `{ success, responseValue, message, executedOn }`.
+
+| Método | Ruta | Rol | Qué hace |
+|---|---|---|---|
+| GET | `/api/espacios` | USUARIO, ADMIN | Lista los espacios |
+| GET | `/api/espacios/{id}` | USUARIO, ADMIN | Busca un espacio |
+| GET | `/api/espacios/{id}/validacion` | USUARIO, ADMIN | ¿El espacio sirve para esta franja, actividad y equipamiento? |
+| GET | `/api/espacios/compatibles` | USUARIO, ADMIN | Espacios que sirven para una franja (sin mirar la ocupación) |
+| POST · PUT · DELETE | `/api/espacios[/{id}]` | ADMIN | Alta, modificación y baja de espacios |
+| GET | `/api/reservas/disponibilidad` | USUARIO | Espacios que sirven **y** están libres en una franja |
+| POST | `/api/reservas` | USUARIO | Crea una reserva (`PENDIENTE` si es un evento, si no `CONFIRMADA`) |
+| GET | `/api/reservas/mias` | USUARIO | Las reservas del usuario logueado |
+| PATCH | `/api/reservas/{id}/cancelar` | USUARIO | Cancela una reserva propia |
+| GET | `/api/reservas[?estado=...]` | ADMIN | Todas las reservas, con filtro opcional por estado |
+| PATCH | `/api/reservas/{id}/aprobar` · `/rechazar` | ADMIN | Aprueba o rechaza un evento pendiente |
+
+Sin token, el gateway responde **401**; con un token válido pero sin el rol, **403**. Cualquier otra ruta se rechaza.
+
+---
+
+## Qué pasa si Open-Meteo no responde
+
+Open-Meteo es la API pública de clima que usamos para la regla RN4 (no se reserva una cancha si se pronostica más de 60 % de lluvia). Solo se consulta para las **canchas**. ms-espacios la llama con un timeout de 2 segundos para conectar y 3 para leer, y si no responde, tarda demasiado o devuelve datos incompletos:
+
+- **Reservar una cancha** → **503** *"No se pudo consultar el pronóstico del clima"*. Sin pronóstico no se puede garantizar que no llueva, así que no se confirma la reserva.
+- **Buscar disponibles** → **200**, pero **sin las canchas**: se omiten de la búsqueda y el resto de los espacios aparece normalmente.
+- **Aulas, laboratorios y salas** → funcionan igual que siempre, porque no dependen del clima.
+
+Cada falla queda en el log de ms-espacios con nivel `WARN`, con el error real de la conexión. Para probarlo se levanta ms-espacios con `OPEN_METEO_URL` apuntando a una dirección que no responde (sección 6 de la [guía de pruebas](Docs/guia-pruebas.md)).
 
 ---
 
@@ -151,11 +274,28 @@ Si una dependencia externa falla, el sistema responde **503** en vez de romperse
 ```
 .
 ├── campus-commons/        # JAR común (mvn install → ~/.m2)
-├── ms-espacios/           # Microservicio de espacios (puerto 8081)
-├── ms-reservas/           # Microservicio de reservas (puerto 8082)
+├── ms-espacios/           # Microservicio de espacios (puerto 8081, interno)
+├── ms-reservas/           # Microservicio de reservas (puerto 8082, interno)
 ├── api-gateway/           # Gateway y seguridad (puerto 8080)
 ├── keycloak/
 │   └── realm-campus.json  # Realm importado al arrancar Keycloak
-├── Docs/                  # Documentación del proyecto
-└── docker-compose.yml
+├── Docs/                  # Documentación del proyecto (ver abajo)
+├── build.sh               # Compila los cuatro proyectos en orden
+└── docker-compose.yml     # Levanta Keycloak, los dos microservicios y el gateway
 ```
+
+Cada aplicación tiene su `Dockerfile`, que copia el JAR que deja `build.sh` en `target/`.
+
+---
+
+## Documentación
+
+| Archivo | Qué tiene |
+|---|---|
+| [`Docs/guia-pruebas.md`](Docs/guia-pruebas.md) | Cómo levantarlo y el guion de la demo: un comando por cada regla, estado, caso de seguridad y falla |
+| [`Docs/CampusReservas.postman_collection.json`](Docs/CampusReservas.postman_collection.json) y [`environment`](Docs/CampusReservas.postman_environment.json) | Colección de Postman: login por usuario y 62 pedidos con su test, por el gateway |
+| [`Docs/defensa.md`](Docs/defensa.md) | Explicación de cada archivo y cada decisión del equipo (T1 en adelante), para la presentación |
+| [`Docs/TPI-CampusReservas-Entrega-1-1.docx`](Docs/TPI-CampusReservas-Entrega-1-1.docx) | Entrega 1: propuesta, reglas de negocio y diagramas C1 y C2 |
+| [`Docs/diagramas/c1-contexto.png`](Docs/diagramas/c1-contexto.png) | Diagrama de contexto (C1) actualizado |
+| [`Docs/diagramas/c2-contenedores.png`](Docs/diagramas/c2-contenedores.png) | Diagrama de contenedores (C2) actualizado, con su fuente en SVG |
+| [`Docs/TPI-CampusReservas-Plan-de-desarrollo.docx`](Docs/TPI-CampusReservas-Plan-de-desarrollo.docx) | Plan de desarrollo por fases, con el código de referencia de cada parte |
