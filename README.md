@@ -202,7 +202,7 @@ Si una dependencia falla, el sistema responde **503** ("ahora no puedo, reintent
 | Maven | 3.9 o más | Instalar `campus-commons` en el repositorio local |
 | Docker Desktop | reciente | Correr todo el sistema |
 | Git Bash (en Windows) | viene con Git | Correr `build.sh` |
-| Postman | reciente | Correr la demo |
+| Postman | reciente | Probar la aplicación |
 
 ### 1. Compilar
 
@@ -247,38 +247,9 @@ Vienen en `keycloak/realm-campus.json`, que Keycloak importa al arrancar. La con
 
 ms-espacios arranca con 5 espacios de prueba: Aula 101, Aula 102, Laboratorio 3, Sala de reuniones y Cancha de fútbol.
 
-### 4. La demo, en Postman
+### 4. Probarlo
 
-Toda la demo se hace desde Postman. Cada pedido pasa por el gateway con el JWT de Keycloak. Los tokens se piden y se renuevan solos (duran 5 minutos) y las fechas de las reservas se calculan solas, así que no hay que copiar nada a mano.
-
-**Importar.** En Postman, **Import** → los tres archivos de `Docs/`:
-
-- `CampusReservas-simple.postman_collection.json`: la demo simple.
-- `CampusReservas.postman_collection.json`: la demo completa.
-- `CampusReservas.postman_environment.json`: el environment de la demo completa.
-
-**Demo simple: *CampusReservas (demo simple)*.** usuario1 reserva y admin1 aprueba el evento. No necesita environment. Se corre entera con clic derecho → **Run collection** → **Run** (30 tests), o pedido por pedido con **Send**. Cada pedido dice en su descripción qué tiene que responder.
-
-| # | Quién | Qué hace | Responde |
-|---|---|---|---|
-| 1-2 | — | Login de usuario1 y de admin1 | 200 |
-| 3-5 | usuario1 | Ve los espacios, el Aula 101 y busca dónde dar una clase | 200 |
-| 6 | usuario1 | Reserva una clase en el Aula 101 | 201 `CONFIRMADA` |
-| 7 | usuario1 | La misma franja otra vez (RN6) | 409 |
-| 8 | usuario1 | 50 personas en un aula para 40 (RN5) | 422 |
-| 9 | usuario1 | Una reserva de 15 minutos (RN2) | 422 |
-| 10 | usuario1 | Pide un evento (RN13) | 201 `PENDIENTE` |
-| 11 | admin1 | Ve los eventos pendientes | 200 |
-| 12 | admin1 | Aprueba el evento | 200 `CONFIRMADA` |
-| 13 | usuario1 | Ve sus reservas | 200 |
-| 14-15 | usuario1 | Cancela la clase y el evento | 200 `CANCELADA` |
-| 16 | — | Pide algo sin token | 401 |
-
-Como al final cancela todo, se puede correr las veces que haga falta.
-
-**Demo completa: *CampusReservas*.** Arriba a la derecha hay que elegir el environment **CampusReservas (Docker)**. Recorre cada regla de negocio, los estados de una reserva y la seguridad del gateway, con los tres usuarios. Se corre con **Run collection**, destildando la carpeta 8: 73 tests.
-
-La carpeta 8 (resiliencia) prueba qué pasa si se cae ms-espacios y se corre aparte: antes, `docker compose stop ms-espacios`; después, `docker compose start ms-espacios`.
+La aplicación se prueba con **Postman**. Todos los pedidos van al gateway (`http://localhost:8080`) con el JWT que entrega Keycloak en `Authorization: Bearer`.
 
 ### 5. Apagar
 
@@ -337,7 +308,7 @@ Cada falla queda en el log de ms-espacios con nivel `WARN`, con el error real de
 ├── api-gateway/           # Gateway y seguridad (puerto 8080)
 ├── keycloak/
 │   └── realm-campus.json  # Realm importado al arrancar Keycloak
-├── Docs/                  # Colecciones de Postman y diagramas (ver abajo)
+├── Docs/                  # Diagramas de arquitectura (ver abajo)
 ├── build.sh               # Compila los cuatro proyectos en orden
 └── docker-compose.yml     # Levanta Keycloak, los dos microservicios y el gateway
 ```
@@ -346,11 +317,9 @@ Cada aplicación tiene su `Dockerfile`, que copia el JAR que deja `build.sh` en 
 
 ---
 
-## Postman y diagramas
+## Diagramas
 
 | Archivo | Qué tiene |
 |---|---|
-| [`Docs/CampusReservas-simple.postman_collection.json`](Docs/CampusReservas-simple.postman_collection.json) | Demo simple: usuario1 reserva y admin1 aprueba el evento. 16 pedidos, sin environment |
-| [`Docs/CampusReservas.postman_collection.json`](Docs/CampusReservas.postman_collection.json) y [`environment`](Docs/CampusReservas.postman_environment.json) | Demo completa: cada regla, estado y caso de seguridad. 63 pedidos con su test |
 | [`Docs/diagramas/c1-contexto.png`](Docs/diagramas/c1-contexto.png) | Diagrama de contexto (C1) |
 | [`Docs/diagramas/c2-contenedores.png`](Docs/diagramas/c2-contenedores.png) | Diagrama de contenedores (C2), con su fuente en SVG |
