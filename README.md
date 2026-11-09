@@ -98,6 +98,34 @@ stateDiagram-v2
 
 Tres aplicaciones Spring (un gateway y dos microservicios), cada microservicio con su propia base H2, y un JAR común. Todo corre en Docker Compose junto con Keycloak; **solo el gateway y Keycloak publican puertos**, así que la red interna de Docker funciona como *trusted zone*.
 
+### Diagrama de contexto (C1)
+
+```mermaid
+flowchart TB
+    ADM([Administrador<br/>Bedelía])
+    USR([Usuario<br/>Estudiante o docente])
+    CR[CampusReservas<br/>Backend de reservas de espacios]
+    OM[[Open-Meteo<br/>API pública de pronóstico]]
+    KC[[Keycloak<br/>Identity Provider]]
+
+    ADM -- "Administra espacios, aprueba eventos<br/>y consulta reservas<br/>HTTPS/JSON + JWT" --> CR
+    USR -- "Busca espacios disponibles,<br/>reserva y cancela<br/>HTTPS/JSON + JWT" --> CR
+    ADM -- "Inicia sesión (OIDC)" --> KC
+    USR -- "Inicia sesión (OIDC)" --> KC
+    CR -- "Consulta la probabilidad de lluvia<br/>para las canchas (HTTPS/JSON)" --> OM
+    CR -- "Valida los tokens<br/>con claves públicas (OIDC)" --> KC
+```
+
+| Elemento | Qué es |
+|---|---|
+| **Administrador** | Bedelía. Administra los espacios, aprueba o rechaza los eventos y consulta todas las reservas |
+| **Usuario** | Estudiante o docente. Busca espacios disponibles, reserva y cancela sus reservas |
+| **CampusReservas** | Valida cada reserva según el tipo de espacio (horario, actividad, equipamiento, capacidad, superposición y, en canchas al aire libre, el pronóstico de lluvia). Maneja el ciclo de vida de la reserva y sugiere espacios disponibles |
+| **Open-Meteo** | Sistema externo: pronóstico del tiempo por coordenadas |
+| **Keycloak** | Sistema externo: autentica usuarios con OIDC y emite tokens JWT con los roles |
+
+### Diagrama de contenedores (C2)
+
 ```mermaid
 flowchart LR
     U([Usuario / Admin])
