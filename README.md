@@ -103,19 +103,28 @@ Tres aplicaciones Spring (un gateway y dos microservicios), cada microservicio c
 
 ```mermaid
 flowchart TB
-    ADM([Administrador<br/>Bedelía])
-    USR([Usuario<br/>Estudiante o docente])
-    CR[CampusReservas<br/>Backend de reservas de espacios]
-    OM[[Open-Meteo<br/>API pública de pronóstico]]
-    KC[[Keycloak<br/>Identity Provider]]
+    ADM(["<b>Administrador</b><br/>Bedelía"])
+    USR(["<b>Usuario</b><br/>Estudiante o docente"])
+    CR["<b>CampusReservas</b><br/>Backend de reservas de espacios"]
+    OM["<b>Open-Meteo</b><br/>Pronóstico del tiempo"]
+    KC["<b>Keycloak</b><br/>Identity Provider"]
 
-    ADM -- "Administra espacios, aprueba eventos<br/>y consulta reservas<br/>HTTPS/JSON + JWT" --> CR
-    USR -- "Busca espacios disponibles,<br/>reserva y cancela<br/>HTTPS/JSON + JWT" --> CR
-    ADM -- "Inicia sesión (OIDC)" --> KC
-    USR -- "Inicia sesión (OIDC)" --> KC
-    CR -- "Consulta la probabilidad de lluvia<br/>para las canchas (HTTPS/JSON)" --> OM
-    CR -- "Valida los tokens<br/>con claves públicas (OIDC)" --> KC
+    ADM -- "Administra espacios<br/>y aprueba eventos" --> CR
+    USR -- "Busca, reserva<br/>y cancela" --> CR
+    ADM -. "Inicia sesión" .-> KC
+    USR -. "Inicia sesión" .-> KC
+    CR -- "Probabilidad de lluvia" --> OM
+    CR -- "Valida tokens" --> KC
+
+    classDef persona fill:#08427B,stroke:#052E56,color:#fff
+    classDef sistema fill:#1168BD,stroke:#0B4884,color:#fff
+    classDef externo fill:#999999,stroke:#6B6B6B,color:#fff
+    class ADM,USR persona
+    class CR sistema
+    class OM,KC externo
 ```
+
+Los usuarios hablan con CampusReservas por HTTPS/JSON con un JWT; el login contra Keycloak es OIDC (líneas punteadas).
 
 | Elemento | Qué es |
 |---|---|
@@ -137,15 +146,20 @@ flowchart LR
     DBE[(espacios-db<br/>H2)]
     DBR[(reservas-db<br/>H2)]
     OM[[Open-Meteo<br/>API pública]]
+    CC{{campus-commons<br/>JAR compartido}}
 
     U -- "login OIDC → JWT" --> KC
     U -- "Bearer JWT" --> GW
+    GW -- "valida JWT (claves públicas JWKS)" --> KC
     GW -- "/api/espacios/**" --> ME
     GW -- "/api/reservas/** + X-Usuario" --> MR
     MR -- "validación y compatibles" --> ME
     ME --> DBE
     MR --> DBR
     ME -- "pronóstico (solo canchas)" --> OM
+    GW -. "usa" .-> CC
+    ME -. "usa" .-> CC
+    MR -. "usa" .-> CC
 
     subgraph Red interna de Docker
         GW
