@@ -31,3 +31,6 @@ GUIA-BACKEND.md
 
 # Archivos temporales que crea Word mientras un documento está abierto
 ~$*
+
+# ===== Configuración local de Claude Code =====
+.claude/

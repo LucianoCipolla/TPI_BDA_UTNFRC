@@ -28,6 +28,8 @@
 	</scm>
 	<properties>
 		<java.version>25</java.version>
+		<!-- H2 2.4.240 (la de Spring Boot) rompe los INSERT cuando Hikari renueva las conexiones (~30 min) -->
+		<h2.version>2.3.232</h2.version>
 	</properties>
 	<dependencies>
 		<dependency>
