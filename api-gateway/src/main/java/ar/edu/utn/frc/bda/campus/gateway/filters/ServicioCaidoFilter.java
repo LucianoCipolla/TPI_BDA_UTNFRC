@@ -7,6 +7,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
+import org.springframework.cloud.gateway.route.Route;
+import org.springframework.cloud.gateway.support.ServerWebExchangeUtils;
 import org.springframework.core.Ordered;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpStatus;
@@ -49,7 +51,11 @@ public class ServicioCaidoFilter implements GlobalFilter, Ordered {
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
         return chain.filter(exchange)
                 .onErrorResume(ServicioCaidoFilter::esServicioCaido, ex -> {
-                    log.warn("503 {} no responde: {}", exchange.getRequest().getPath(), ex.getMessage());
+                    Route ruta = exchange.getAttribute(ServerWebExchangeUtils.GATEWAY_ROUTE_ATTR);
+                    log.warn("Falla 503 Service Unavailable | {} {} | el microservicio de destino ({}) no responde"
+                            + " (¿contenedor apagado?) | causa: {}",
+                            exchange.getRequest().getMethod(), exchange.getRequest().getPath(),
+                            ruta != null ? ruta.getUri() : "desconocido", ex.getMessage());
                     return responder503(exchange.getResponse());
                 });
     }

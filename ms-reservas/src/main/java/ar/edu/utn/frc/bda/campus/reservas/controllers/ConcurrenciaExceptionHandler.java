@@ -9,6 +9,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+import jakarta.servlet.http.HttpServletRequest;
+
 import ar.edu.utn.frc.bda.campus.commons.ApiResponse;
 import lombok.extern.slf4j.Slf4j;
 
@@ -19,8 +21,11 @@ import lombok.extern.slf4j.Slf4j;
 public class ConcurrenciaExceptionHandler {
 
     @ExceptionHandler({OptimisticLockingFailureException.class, DataIntegrityViolationException.class})
-    public ResponseEntity<ApiResponse<Void>> choque(RuntimeException ex) {
-        log.info("409 choque de concurrencia: {}", ex.getClass().getSimpleName());
+    public ResponseEntity<ApiResponse<Void>> choque(RuntimeException ex, HttpServletRequest req) {
+        String usuario = req.getHeader("X-Usuario");
+        log.info("Rechazado 409 Conflict | {} {}{} | Choque de concurrencia (RN15): otro pedido modificó"
+                + " la agenda del espacio o la reserva al mismo tiempo, y ganó el primero en confirmar",
+                req.getMethod(), req.getRequestURI(), usuario != null ? " (usuario: " + usuario + ")" : "");
         return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.create(false, null,
                 "Otro usuario modificó ese espacio o esa reserva al mismo tiempo. Intentá de nuevo."));
     }

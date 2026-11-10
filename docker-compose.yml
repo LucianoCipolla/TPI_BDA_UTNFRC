@@ -15,11 +15,13 @@ services:
     build: ./ms-espacios            # sin ports: solo accesible por la red interna
     environment:
       TZ: America/Argentina/Cordoba   # las imágenes corren en UTC (T68)
+      SPRING_OUTPUT_ANSI_ENABLED: always   # colores en los logs (sin terminal, Spring los apaga)
 
   ms-reservas:
     build: ./ms-reservas
     environment:
       TZ: America/Argentina/Cordoba
+      SPRING_OUTPUT_ANSI_ENABLED: always
       MS_ESPACIOS_URL: http://ms-espacios:8081
     depends_on: [ms-espacios]
 
@@ -29,6 +31,7 @@ services:
       - "8080:8080"                 # el único punto de entrada
     environment:
       TZ: America/Argentina/Cordoba
+      SPRING_OUTPUT_ANSI_ENABLED: always
       MS_ESPACIOS_URL: http://ms-espacios:8081
       MS_RESERVAS_URL: http://ms-reservas:8082
       JWK_SET_URI: http://keycloak:8080/realms/campus/protocol/openid-connect/certs

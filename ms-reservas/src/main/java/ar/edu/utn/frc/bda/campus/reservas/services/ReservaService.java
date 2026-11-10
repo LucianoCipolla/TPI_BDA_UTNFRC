@@ -1,6 +1,7 @@
 package ar.edu.utn.frc.bda.campus.reservas.services;
 
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Set;
 
@@ -38,6 +39,9 @@ public class ReservaService {
     private final CadenaValidacionReserva cadena;
     private final EspaciosClient espaciosClient;
 
+    private static final DateTimeFormatter FECHA_HORA = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
+    private static final DateTimeFormatter HORA = DateTimeFormatter.ofPattern("HH:mm");
+
     // ---------- Crear ----------
 
     @Transactional
@@ -58,8 +62,10 @@ public class ReservaService {
                 .actividad(req.actividad())
                 .estado(estado)
                 .build());
-        log.info("Reserva {} creada por {}: espacio {} ({}), {} a {}, {}",
-                r.getId(), usuario, r.getEspacioId(), r.getEspacioNombre(), r.getInicio(), r.getFin(), estado);
+        log.info("Reserva #{} CREADA | {} reservó '{}' (espacio {}) el {} para {} ({} asistentes) | estado: {}",
+                r.getId(), usuario, r.getEspacioNombre(), r.getEspacioId(), franja(r),
+                r.getActividad(), r.getAsistentes(),
+                estado == EstadoReserva.PENDIENTE ? "PENDIENTE (los eventos esperan aprobación de bedelía)" : estado);
         return aDto(r);
     }
 
@@ -71,16 +77,16 @@ public class ReservaService {
         if (!r.getInicio().isAfter(LocalDateTime.now())) {
             throw new ReglaNegocioException("La reserva ya empezó");
         }
-        cambiarEstado(r, EstadoReserva.CONFIRMADA);
-        log.info("Reserva {} aprobada por bedelía", id);
+        EstadoReserva antes = cambiarEstado(r, EstadoReserva.CONFIRMADA);
+        log.info("Reserva #{} APROBADA por bedelía | {} → CONFIRMADA | '{}' el {}", id, antes, r.getEspacioNombre(), franja(r));
         return aDto(r);
     }
 
     @Transactional
     public ReservaDto rechazar(Long id) {                        // ADMIN
         Reserva r = buscar(id);
-        cambiarEstado(r, EstadoReserva.RECHAZADA);
-        log.info("Reserva {} rechazada por bedelía", id);
+        EstadoReserva antes = cambiarEstado(r, EstadoReserva.RECHAZADA);
+        log.info("Reserva #{} RECHAZADA por bedelía | {} → RECHAZADA | '{}' el {}", id, antes, r.getEspacioNombre(), franja(r));
         return aDto(r);
     }
 
@@ -93,8 +99,8 @@ public class ReservaService {
         if (!r.getInicio().isAfter(LocalDateTime.now())) {
             throw new ReglaNegocioException("La reserva ya empezó");                     // RN7
         }
-        cambiarEstado(r, EstadoReserva.CANCELADA);
-        log.info("Reserva {} cancelada por {}", id, usuario);
+        EstadoReserva antes = cambiarEstado(r, EstadoReserva.CANCELADA);
+        log.info("Reserva #{} CANCELADA por {} | {} → CANCELADA | '{}' el {}", id, usuario, antes, r.getEspacioNombre(), franja(r));
         return aDto(r);
     }
 
@@ -136,12 +142,20 @@ public class ReservaService {
                 .orElseGet(() -> agendaRepository.saveAndFlush(new AgendaEspacio(espacioId)));
     }
 
-    /** RN14: solo los cambios del diagrama de estados; cualquier otro es un 409. */
-    private void cambiarEstado(Reserva r, EstadoReserva destino) {
-        if (!r.getEstado().puedePasarA(destino)) {
-            throw new ConflictoException("Una reserva " + r.getEstado() + " no puede pasar a " + destino);
+    /** RN14: solo los cambios del diagrama de estados; cualquier otro es un 409. Devuelve el estado anterior. */
+    private EstadoReserva cambiarEstado(Reserva r, EstadoReserva destino) {
+        EstadoReserva antes = r.getEstado();
+        if (!antes.puedePasarA(destino)) {
+            throw new ConflictoException("Una reserva " + antes + " no puede pasar a " + destino);
         }
         r.setEstado(destino);
+        return antes;
+    }
+
+    /** "15/11/2026 10:00 a 12:00" (o con la fecha completa en el fin si termina otro día), para los logs. */
+    private static String franja(Reserva r) {
+        boolean mismoDia = r.getInicio().toLocalDate().equals(r.getFin().toLocalDate());
+        return r.getInicio().format(FECHA_HORA) + " a " + r.getFin().format(mismoDia ? HORA : FECHA_HORA);
     }
 
     private Reserva buscar(Long id) {

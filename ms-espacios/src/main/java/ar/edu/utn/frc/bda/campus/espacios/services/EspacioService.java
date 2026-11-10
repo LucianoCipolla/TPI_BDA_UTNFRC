@@ -93,7 +93,8 @@ public class EspacioService {
                 }
             } catch (ServicioNoDisponibleException ex) {
                 // Sin pronóstico no se puede garantizar una cancha: se omite y se sigue con el resto
-                log.warn("Se omite '{}' de la búsqueda: {}", e.getNombre(), ex.getMessage());
+                log.warn("Búsqueda de disponibles: se deja afuera '{}' porque no se pudo verificar el clima ({})",
+                        e.getNombre(), ex.getMessage());
             }
         }
         return resultado;

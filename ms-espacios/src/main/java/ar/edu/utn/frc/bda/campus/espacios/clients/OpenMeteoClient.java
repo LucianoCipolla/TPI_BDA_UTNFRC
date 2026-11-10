@@ -35,13 +35,15 @@ public class OpenMeteoClient {
                     .retrieve()
                     .body(OpenMeteoResponse.class);
         } catch (RestClientException ex) {               // no conecta, timeout o error HTTP
-            log.warn("Open-Meteo no respondió para ({}, {}): {}", lat, lon, ex.getMessage());
+            log.warn("No se pudo consultar el clima en Open-Meteo (lat {}, lon {}) para el {} → 503 | causa: {}",
+                    lat, lon, inicio.toLocalDate(), ex.getMessage());
             throw new ServicioNoDisponibleException("No se pudo consultar el pronóstico del clima");
         }
 
         if (r == null || r.hourly() == null || r.hourly().time() == null || r.hourly().lluvia() == null
                 || r.hourly().time().size() != r.hourly().lluvia().size()) {
-            log.warn("Open-Meteo devolvió una respuesta incompleta para ({}, {})", lat, lon);
+            log.warn("Open-Meteo respondió, pero sin los datos de lluvia esperados (lat {}, lon {}) para el {} → 503",
+                    lat, lon, inicio.toLocalDate());
             throw new ServicioNoDisponibleException("Respuesta inesperada del servicio de clima");
         }
 

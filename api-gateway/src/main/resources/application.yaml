@@ -2,6 +2,8 @@ server:
   port: 8080
 
 spring:
+  main:
+    banner-mode: off
   application:
     name: api-gateway
   cloud:
@@ -19,6 +21,15 @@ spring:
           issuer-uri: http://localhost:8180/realms/campus
           # De dónde se bajan las claves públicas; en Docker se cambia por keycloak:8080
           jwk-set-uri: ${JWK_SET_URI:http://localhost:8180/realms/campus/protocol/openid-connect/certs}
+
+logging:
+  pattern:
+    # Corto y legible: hora, nivel y clase (sin fecha, PID ni thread). docker compose ya antepone el servicio
+    console: "%clr(%d{HH:mm:ss}){faint} %clr(%5p) %clr(%-28.28logger{0}){cyan} %m%n"
+  level:
+    root: WARN                                       # Spring, Tomcat, Hibernate: solo avisos y errores
+    org.springdoc: ERROR                             # sus avisos de "habilitado en producción" no aplican
+    ar.edu.utn.frc.bda.campus: ${LOG_LEVEL:INFO}
 
 campus:
   ms-espacios-url: ${MS_ESPACIOS_URL:http://localhost:8081}

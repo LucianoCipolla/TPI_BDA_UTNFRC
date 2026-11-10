@@ -2,6 +2,8 @@ server:
   port: 8082
 
 spring:
+  main:
+    banner-mode: off
   application:
     name: ms-reservas
   datasource:
@@ -14,7 +16,12 @@ spring:
     open-in-view: false
 
 logging:
+  pattern:
+    # Corto y legible: hora, nivel y clase (sin fecha, PID ni thread). docker compose ya antepone el servicio
+    console: "%clr(%d{HH:mm:ss}){faint} %clr(%5p) %clr(%-28.28logger{0}){cyan} %m%n"
   level:
+    root: WARN                                       # Spring, Tomcat, Hibernate: solo avisos y errores
+    org.springdoc: ERROR                             # sus avisos de "habilitado en producción" no aplican
     ar.edu.utn.frc.bda.campus: ${LOG_LEVEL:INFO}     # nuestro código; DEBUG para ver más detalle
 
 springdoc:

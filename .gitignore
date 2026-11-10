@@ -27,6 +27,7 @@ Docs/*
 # Colecciones y environments de Postman, estén donde estén
 *.postman_collection.json
 *.postman_environment.json
+GUIA-BACKEND.md
 
 # Archivos temporales que crea Word mientras un documento está abierto
 ~$*

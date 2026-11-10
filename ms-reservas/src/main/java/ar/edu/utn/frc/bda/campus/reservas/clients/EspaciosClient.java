@@ -50,7 +50,8 @@ public class EspaciosClient {
         } catch (HttpServerErrorException.ServiceUnavailable ex) {       // ms-espacios sin pronóstico → 503
             throw new ServicioNoDisponibleException(mensajeRemoto(ex, "No se pudo verificar el clima del espacio"));
         } catch (RestClientException ex) {                               // caído, timeout u otro error → 503
-            log.warn("ms-espacios no respondió al validar el espacio {}: {}", espacioId, ex.getMessage());
+            log.warn("No se pudo validar el espacio {}: ms-espacios no responde (caído o timeout) → se responde 503 | causa: {}",
+                    espacioId, ex.getMessage());
             throw new ServicioNoDisponibleException(NO_DISPONIBLE);
         }
     }
@@ -72,7 +73,8 @@ public class EspaciosClient {
         } catch (HttpClientErrorException ex) {                          // pedido inválido → 422
             throw new ReglaNegocioException(mensajeRemoto(ex, "El pedido de búsqueda no es válido"));
         } catch (RestClientException ex) {                               // caído, timeout u otro error → 503
-            log.warn("ms-espacios no respondió a la búsqueda de compatibles: {}", ex.getMessage());
+            log.warn("No se pudo buscar espacios disponibles: ms-espacios no responde (caído o timeout) → se responde 503 | causa: {}",
+                    ex.getMessage());
             throw new ServicioNoDisponibleException(NO_DISPONIBLE);
         }
     }
